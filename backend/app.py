@@ -15,6 +15,7 @@ from fastapi.templating import Jinja2Templates
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
 
 import time
+from datetime import datetime, timedelta, timezone
 import numpy as np
 import cv2
 import torch
@@ -41,6 +42,7 @@ from backend.models.doc_enhancer import DocEnhancerNet
 # --- Configuration ---
 BASE_DIR = Path(__file__).parent.parent
 CHECKPOINT_DIR = BASE_DIR / 'checkpoints'
+EVALUATION_DIR = BASE_DIR / 'evaluation'
 MODEL_CHECKPOINT_PATH = CHECKPOINT_DIR / 'document_restorer' / 'best.pth'
 
 RESTORATION_TILE_SIZE = 1024
@@ -49,6 +51,7 @@ IMAGE_TEST_ROOT = BASE_DIR / 'data' / 'test'
 DOWNLOAD_ROOT = BASE_DIR / 'datasets' / 'ShadowDocument7K'
 UPLOAD_DIR = BASE_DIR / 'data' / 'uploads'
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+EVALUATION_DIR.mkdir(parents=True, exist_ok=True)
 IMAGE_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.webp', '.bmp', '.tif', '.tiff'}
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 MAX_IMAGE_PIXELS = 25_000_000
@@ -163,6 +166,22 @@ def _safe_training_output(value: str) -> str:
     if output_path != checkpoint_root and checkpoint_root not in output_path.parents:
         raise HTTPException(status_code=400, detail="Training output must be inside checkpoints/.")
     return str(output_path.relative_to(BASE_DIR))
+
+def _safe_evaluation_output(value: str) -> str:
+    output_path = (BASE_DIR / value).resolve()
+    evaluation_root = EVALUATION_DIR.resolve()
+    if output_path != evaluation_root and evaluation_root not in output_path.parents:
+        raise HTTPException(status_code=400, detail="Evaluation output must be inside evaluation/.")
+    return str(output_path.relative_to(BASE_DIR))
+
+def _safe_checkpoint_path(value: str) -> str:
+    checkpoint_path = (BASE_DIR / value).resolve()
+    checkpoint_root = CHECKPOINT_DIR.resolve()
+    if checkpoint_path != checkpoint_root and checkpoint_root not in checkpoint_path.parents:
+        raise HTTPException(status_code=400, detail="Checkpoint must be inside checkpoints/.")
+    if not checkpoint_path.exists():
+        raise HTTPException(status_code=404, detail="Checkpoint not found")
+    return str(checkpoint_path.relative_to(BASE_DIR))
 
 
 def _validate_training_params(epochs: int, batch_size: int, size: int, lr: float, base_channels: int, workers: int):
@@ -332,9 +351,11 @@ async def system_status(request: Request):
             },
         }
         if torch.cuda.is_available():
+            smi_stats = _nvidia_smi_stats()
             for index in range(torch.cuda.device_count()):
                 free, total = torch.cuda.mem_get_info(index)
                 used = total - free
+                runtime = smi_stats.get(index, {})
                 status['gpu']['items'].append({
                     'index': index,
                     'name': torch.cuda.get_device_name(index),
@@ -342,6 +363,10 @@ async def system_status(request: Request):
                     'vram_used_gb': round(used / 1e9, 2),
                     'vram_free_gb': round(free / 1e9, 2),
                     'vram_percent': round((used / total) * 100, 2) if total else 0,
+                    'utilization_percent': runtime.get('utilization_percent'),
+                    'temperature_c': runtime.get('temperature_c'),
+                    'power_draw_w': runtime.get('power_draw_w'),
+                    'power_limit_w': runtime.get('power_limit_w'),
                 })
         return status
     except Exception as error:
@@ -725,9 +750,22 @@ async def training_status(request: Request):
         model_mtime = int(best_path.stat().st_mtime)
 
     running = _training_process is not None and _training_process.poll() is None
+    started_at = _training_started_at
+    if running and started_at is None:
+        try:
+            started_at = psutil.Process(_training_process.pid).create_time()
+        except Exception:
+            started_at = None
+    eta_seconds = _eta_to_seconds(eta)
+    estimated_finish_at = time.time() + eta_seconds if running and eta_seconds is not None else None
 
     return {
         'running': running,
+        'process_kind': _training_kind,
+        'started_at': started_at,
+        'started_at_wib': _format_wib(started_at),
+        'estimated_finish_at': estimated_finish_at,
+        'estimated_finish_wib': _format_wib(estimated_finish_at),
         'has_history': bool(history),
         'epochs': len(history.get('train_loss', [])),
         'best_loss': min(history.get('val_loss', [float('inf')])),
@@ -754,6 +792,45 @@ async def training_preview(request: Request, filename: str):
     if not preview_path.exists() or preview_path.suffix.lower() != '.png':
         raise HTTPException(status_code=404, detail='Preview not found')
     return FileResponse(preview_path, media_type='image/png')
+
+@app.get("/api/training/evaluation/status")
+async def evaluation_status(request: Request, output: str = 'evaluation/document_restorer'):
+    require_api_auth(request)
+    output = _safe_evaluation_output(output)
+    output_path = BASE_DIR / output
+    summary_path = output_path / 'summary.json'
+    summary = None
+    if summary_path.exists():
+        try:
+            import json
+            summary = json.loads(summary_path.read_text(encoding='utf-8'))
+        except Exception:
+            summary = None
+    preview_path = output_path / 'preview_grid.png'
+    return {
+        'exists': summary_path.exists(),
+        'summary': summary,
+        'preview_url': f'/api/training/evaluation/preview?output={output}' if preview_path.exists() else None,
+        'metrics_url': f'/api/training/evaluation/metrics?output={output}' if (output_path / 'metrics.csv').exists() else None,
+    }
+
+@app.get("/api/training/evaluation/preview")
+async def evaluation_preview(request: Request, output: str = 'evaluation/document_restorer'):
+    require_api_auth(request)
+    output = _safe_evaluation_output(output)
+    preview_path = BASE_DIR / output / 'preview_grid.png'
+    if not preview_path.exists():
+        raise HTTPException(status_code=404, detail='Evaluation preview not found')
+    return FileResponse(preview_path, media_type='image/png')
+
+@app.get("/api/training/evaluation/metrics")
+async def evaluation_metrics(request: Request, output: str = 'evaluation/document_restorer'):
+    require_api_auth(request)
+    output = _safe_evaluation_output(output)
+    metrics_path = BASE_DIR / output / 'metrics.csv'
+    if not metrics_path.exists():
+        raise HTTPException(status_code=404, detail='Evaluation metrics not found')
+    return FileResponse(metrics_path, media_type='text/csv', filename='metrics.csv')
 
 
 # =====================================================================
@@ -991,6 +1068,71 @@ import threading
 _training_process = None
 _training_log = []
 _training_lock = threading.Lock()
+_training_started_at = None
+_training_kind = None
+TRAINING_LOG_PATH = CHECKPOINT_DIR / 'document_restorer' / 'run.log'
+WIB = timezone(timedelta(hours=7))
+
+def _format_wib(timestamp: float | None) -> str | None:
+    if not timestamp:
+        return None
+    return datetime.fromtimestamp(timestamp, tz=WIB).strftime('%d %b %Y %H:%M:%S WIB')
+
+def _eta_to_seconds(eta: str | None) -> int | None:
+    if not eta:
+        return None
+
+def _nvidia_smi_stats() -> dict[int, dict]:
+    try:
+        result = subprocess.run(
+            [
+                'nvidia-smi',
+                '--query-gpu=index,utilization.gpu,temperature.gpu,power.draw,power.limit',
+                '--format=csv,noheader,nounits',
+            ],
+            capture_output=True, text=True, timeout=2,
+        )
+        if result.returncode != 0:
+            return {}
+        stats = {}
+        for line in result.stdout.splitlines():
+            parts = [part.strip() for part in line.split(',')]
+            if len(parts) < 5:
+                continue
+            index = int(parts[0])
+            stats[index] = {
+                'utilization_percent': float(parts[1]),
+                'temperature_c': float(parts[2]),
+                'power_draw_w': float(parts[3]),
+                'power_limit_w': float(parts[4]),
+            }
+        return stats
+    except Exception:
+        return {}
+    try:
+        import re as _re
+        match = _re.search(r'(\d+)h\s+(\d+)m\s+(\d+)s', eta)
+        if not match:
+            return None
+        hours, minutes, seconds = (int(value) for value in match.groups())
+        return hours * 3600 + minutes * 60 + seconds
+    except Exception:
+        return None
+
+def _set_training_log(lines: list[str]):
+    global _training_log
+    _training_log = lines[-1500:]
+    TRAINING_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    TRAINING_LOG_PATH.write_text('\n'.join(_training_log) + ('\n' if _training_log else ''), encoding='utf-8')
+
+def _append_training_log(line: str):
+    global _training_log
+    _training_log.append(line)
+    if len(_training_log) > 2000:
+        _training_log = _training_log[-1500:]
+    TRAINING_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with TRAINING_LOG_PATH.open('a', encoding='utf-8') as handle:
+        handle.write(line + '\n')
 
 
 # =====================================================================
@@ -1270,12 +1412,10 @@ def _training_log_reader(proc):
         if not line:
             break
         with _training_lock:
-            _training_log.append(line.rstrip())
-            if len(_training_log) > 2000:
-                _training_log = _training_log[-1500:]
+            _append_training_log(line.rstrip())
     proc.wait()
     with _training_lock:
-        _training_log.append(f'[INFO] Training process exited with code {proc.returncode}')
+        _append_training_log(f'[INFO] Training process exited with code {proc.returncode}')
     _training_process = None
 
 
@@ -1283,6 +1423,7 @@ def _training_log_reader(proc):
 async def start_training(request: Request,
                          clean_data: str = Form(''),
                          paired_data: str = Form(''),
+                         validation_paired_data: str = Form(''),
                          output: str = Form('checkpoints/document_restorer'),
                          epochs: int = Form(100),
                          batch_size: int = Form(8),
@@ -1291,10 +1432,14 @@ async def start_training(request: Request,
                          base_channels: int = Form(32),
                          workers: int = Form(4),
                          device: str = Form('auto'),
+                         resume: str = Form(''),
+                         resume_weights_only: bool = Form(False),
+                         perceptual_weight: float = Form(0.05),
+                         ssim_weight: float = Form(0.1),
                          max_train_samples: int = Form(0),
                          max_val_samples: int = Form(0)):
     require_api_auth(request)
-    global _training_process, _training_log
+    global _training_process, _training_log, _training_started_at, _training_kind
 
     if _training_process is not None and _training_process.poll() is None:
         raise HTTPException(status_code=409, detail='Training already running')
@@ -1312,22 +1457,32 @@ async def start_training(request: Request,
         '--base-channels', str(base_channels),
         '--workers', str(workers),
         '--device', device,
+        '--perceptual-weight', str(perceptual_weight),
+        '--ssim-weight', str(ssim_weight),
     ]
     if clean_data:
         cmd.extend(['--clean-data'] + clean_data.split(','))
     if paired_data:
         cmd.extend(['--paired-data'] + paired_data.split(','))
+    if validation_paired_data:
+        cmd.extend(['--validation-paired-data'] + validation_paired_data.split(','))
+    if resume:
+        cmd.extend(['--resume', resume])
+        if resume_weights_only:
+            cmd.append('--resume-weights-only')
     if max_train_samples > 0:
         cmd.extend(['--max-train-samples', str(max_train_samples)])
     if max_val_samples > 0:
         cmd.extend(['--max-validation-samples', str(max_val_samples)])
 
     with _training_lock:
-        _training_log = [f'[CMD] {" ".join(cmd)}']
+        _training_started_at = time.time()
+        _training_kind = 'training'
+        _set_training_log([f'[CMD] {" ".join(cmd)}'])
 
     proc = subprocess.Popen(
         cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-        cwd=str(BASE_DIR), env={**os.environ, 'PYTHONPATH': str(BASE_DIR)},
+        cwd=str(BASE_DIR), env={**os.environ, 'PYTHONPATH': str(BASE_DIR), 'PYTORCH_CUDA_ALLOC_CONF': 'expandable_segments:True'},
         text=True, bufsize=1, start_new_session=True,
     )
     _training_process = proc
@@ -1357,10 +1512,59 @@ async def stop_training(request: Request):
     return {'success': True, 'message': 'Training stopped'}
 
 
+@app.post("/api/training/evaluate")
+async def evaluate_training(request: Request,
+                            paired_data: str = Form('datasets/ShadowDocument7K/test'),
+                            checkpoint: str = Form('checkpoints/document_restorer/best.pth'),
+                            output: str = Form('evaluation/document_restorer'),
+                            size: int = Form(768),
+                            batch_size: int = Form(1),
+                            workers: int = Form(4),
+                            device: str = Form('cuda'),
+                            max_samples: int = Form(0)):
+    require_api_auth(request)
+    global _training_process, _training_log, _training_started_at, _training_kind
+
+    if _training_process is not None and _training_process.poll() is None:
+        raise HTTPException(status_code=409, detail='Training or evaluation already running')
+
+    _validate_training_params(1, batch_size, size, 1e-4, 32, workers)
+    checkpoint = _safe_checkpoint_path(checkpoint)
+    output = _safe_evaluation_output(output)
+
+    cmd = [
+        sys.executable, str(BASE_DIR / 'evaluate_restorer.py'),
+        '--paired-data', paired_data,
+        '--checkpoint', checkpoint,
+        '--output', output,
+        '--size', str(size),
+        '--batch-size', str(batch_size),
+        '--workers', str(workers),
+        '--device', device,
+    ]
+    if max_samples > 0:
+        cmd.extend(['--max-samples', str(max_samples)])
+
+    with _training_lock:
+        _training_started_at = time.time()
+        _training_kind = 'evaluation'
+        _set_training_log([f'[EVAL CMD] {" ".join(cmd)}'])
+
+    proc = subprocess.Popen(
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        cwd=str(BASE_DIR), env={**os.environ, 'PYTHONPATH': str(BASE_DIR), 'PYTORCH_CUDA_ALLOC_CONF': 'expandable_segments:True'},
+        text=True, bufsize=1, start_new_session=True,
+    )
+    _training_process = proc
+    threading.Thread(target=_training_log_reader, args=(proc,), daemon=True).start()
+    return {'success': True, 'pid': proc.pid}
+
 @app.get("/api/training/log")
 async def training_log(request: Request, offset: int = 0):
     require_api_auth(request)
     with _training_lock:
         running = _training_process is not None and _training_process.poll() is None
+        if not _training_log and TRAINING_LOG_PATH.exists():
+            _set_training_log(TRAINING_LOG_PATH.read_text(encoding='utf-8').splitlines())
         lines = _training_log[offset:]
     return {'running': running, 'lines': lines, 'total': len(_training_log)}

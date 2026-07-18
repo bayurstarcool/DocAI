@@ -1,11 +1,12 @@
 <script>
   import { refreshIcons } from "../lib/icons.js"
-  import { onMount } from 'svelte'
+  import { onDestroy, onMount } from 'svelte'
   import { apiJson } from '../stores/auth.js'
   import { showToast } from '../stores/toast.js'
 
   let modelInfo = {}
   let selectedFile = null
+  let originalUrl = ''
   let selectedMode = 'restore'
   let resultUrl = ''
   let processing = false
@@ -31,9 +32,28 @@
     } catch(e) { docshadowWeights = [] }
   })
 
+  onDestroy(() => {
+    if (resultUrl) URL.revokeObjectURL(resultUrl)
+  })
+
   function handleFile(file) {
+    if (resultUrl) URL.revokeObjectURL(resultUrl)
     selectedFile = file
     resultUrl = ''
+    originalUrl = ''
+
+    const reader = new FileReader()
+    reader.onload = () => {
+      if (selectedFile === file) originalUrl = reader.result
+    }
+    reader.onerror = () => showToast('Gagal membaca preview original image', 'error')
+    reader.readAsDataURL(file)
+  }
+
+  function handleDrop(event) {
+    event.preventDefault()
+    const file = event.dataTransfer?.files?.[0]
+    if (file?.type?.startsWith('image/')) handleFile(file)
   }
 
   async function runTest() {
@@ -57,6 +77,7 @@
         throw new Error(err.detail || 'Test failed')
       }
       const blob = await res.blob()
+      if (resultUrl) URL.revokeObjectURL(resultUrl)
       resultUrl = URL.createObjectURL(blob)
       const ms = Math.round(performance.now() - start)
       showToast(`${allModeLabels[selectedMode] || selectedMode} completed (${ms}ms)`)
@@ -88,7 +109,7 @@
   <h2><i data-lucide="upload-cloud"></i> Upload & Run</h2>
   <div class="grid-2">
     <div>
-      <div class="upload-zone" onclick={() => document.getElementById('testFileInput').click()}>
+      <div class="upload-zone" ondrop={handleDrop} ondragover={(e) => e.preventDefault()} onclick={() => document.getElementById('testFileInput').click()}>
         <i data-lucide="image-plus"></i>
         <p>Klik atau drag & drop gambar</p>
         <input type="file" id="testFileInput" accept="image/*" style="display:none"
@@ -125,10 +146,15 @@
       </div>
     </div>
     <div>
-      {#if selectedFile}
+      {#if originalUrl}
         <div class="img-box">
           <div class="label"><i data-lucide="image"></i> Original</div>
-          <img src={URL.createObjectURL(selectedFile)} alt="Original" />
+          <img src={originalUrl} alt="Original" />
+        </div>
+      {:else if selectedFile}
+        <div class="img-box placeholder">
+          <div class="label"><i data-lucide="image"></i> Original</div>
+          <div class="empty-preview">Loading preview...</div>
         </div>
       {/if}
     </div>
@@ -138,8 +164,17 @@
 {#if resultUrl}
   <div class="card">
     <h2><i data-lucide="sparkles"></i> Result — {selectedMode}</h2>
-    <div class="img-box">
-      <img src={resultUrl} alt="Result" />
+    <div class="compare-grid">
+      {#if originalUrl}
+        <div class="img-box">
+          <div class="label"><i data-lucide="image"></i> Original</div>
+          <img src={originalUrl} alt="Original" />
+        </div>
+      {/if}
+      <div class="img-box">
+        <div class="label"><i data-lucide="sparkles"></i> Result</div>
+        <img src={resultUrl} alt="Result" />
+      </div>
     </div>
   </div>
 {/if}
@@ -153,6 +188,7 @@
   .card { background: var(--bg3); border: 1px solid var(--border); border-radius: var(--radius); padding: 1.5rem; margin-bottom: 1.5rem; }
   .card :global(h2) { font-size: 1.1rem; font-weight: 600; margin-bottom: 1rem; display: flex; align-items: center; gap: 0.5rem; }
   .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; }
+  .compare-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; align-items: stretch; }
   .info-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 0.75rem; }
   .info-item { background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-xs); padding: 0.875rem; }
   .info-item .k { font-size: 0.7rem; font-weight: 700; color: var(--text2); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.375rem; }
@@ -177,8 +213,9 @@
   .btn-primary { background: var(--primary); color: white; }
   .img-box { background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-sm); overflow: hidden; }
   .img-box .label { padding: 0.625rem 0.75rem; border-bottom: 1px solid var(--border); font-size: 0.75rem; font-weight: 600; color: var(--text2); display: flex; align-items: center; gap: 0.5rem; }
-  .img-box img { width: 100%; display: block; }
+  .img-box img { width: 100%; max-height: 70vh; object-fit: contain; display: block; background: var(--bg); }
+  .empty-preview { min-height: 180px; display: grid; place-items: center; color: var(--text3); font-size: 0.85rem; }
   .info-text { font-size: 0.8rem; color: var(--text2); margin-left: auto; }
   .footer { text-align: center; padding: 2rem 0; color: var(--text3); font-size: 0.8rem; }
-  @media (max-width: 768px) { .grid-2 { grid-template-columns: 1fr; } }
+  @media (max-width: 768px) { .grid-2, .compare-grid { grid-template-columns: 1fr; } }
 </style>

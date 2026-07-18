@@ -13,15 +13,34 @@
   let systemTimer = null
   let training = false
   let systemStatus = null
+  let evaluation = { exists: false, summary: null, preview_url: null, metrics_url: null }
 
-  const config = { epochs: 100, batchSize: 8, size: 512, lr: 0.0002, baseChannels: 32 }
+  const serverPresets = [
+    { id: 'balanced', name: 'Balanced L4', note: 'Rekomendasi server ini: detail bagus, VRAM aman.', epochs: 120, batchSize: 4, size: 768, lr: 0.0002, workers: 12, perceptualWeight: 0.05, ssimWeight: 0.1, resumeBest: false },
+    { id: 'quality', name: 'Fine-tune Quality', note: 'Final quality: size 1024, LR kecil, resume best.pth.', epochs: 180, batchSize: 2, size: 1024, lr: 0.00005, workers: 8, perceptualWeight: 0.03, ssimWeight: 0.15, resumeBest: true },
+    { id: 'speed', name: 'Speed 512', note: 'Cepat untuk sanity check awal.', epochs: 80, batchSize: 12, size: 512, lr: 0.0002, workers: 12, perceptualWeight: 0.05, ssimWeight: 0.1, resumeBest: false }
+  ]
+
+  let selectedPreset = 'balanced'
+  const config = { epochs: 120, batchSize: 4, size: 768, lr: 0.0002, baseChannels: 32, workers: 12, perceptualWeight: 0.05, ssimWeight: 0.1, resumeBest: false, device: 'cuda', maxTrainSamples: 0, maxValSamples: 0, maxEvalSamples: 0 }
+  $: estimatedVram = estimateVram(config.size, config.batchSize)
+  $: vramTotal = systemStatus?.gpu?.items?.[0]?.vram_total_gb || 23
+  $: vramLevel = estimatedVram > vramTotal * 0.92 ? 'danger' : estimatedVram > vramTotal * 0.75 ? 'warning' : 'safe'
+  $: validationDatasets = selectedDatasets.map(path => validationPathFor(path)).filter(Boolean)
 
   onMount(async () => {
     refreshIcons()
     await loadDatasets()
     await refreshStatus()
     await refreshSystemStatus()
+    await refreshEvaluation()
     systemTimer = setInterval(refreshSystemStatus, 2000)
+    if (training) {
+      log = ''
+      logOffset = 0
+      pollTimer = setInterval(pollLog, 2000)
+      pollLog()
+    }
   })
 
   onDestroy(() => {
@@ -48,6 +67,12 @@
   async function refreshSystemStatus() {
     try {
       systemStatus = await apiJson('/api/system/status')
+    } catch(e) {}
+  }
+
+  async function refreshEvaluation() {
+    try {
+      evaluation = await apiJson('/api/training/evaluation/status')
     } catch(e) {}
   }
 
@@ -78,6 +103,17 @@
       formData.append('size', String(config.size))
       formData.append('lr', String(config.lr))
       formData.append('base_channels', String(config.baseChannels))
+      formData.append('workers', String(config.workers))
+      formData.append('device', config.device)
+      formData.append('perceptual_weight', String(config.perceptualWeight))
+      formData.append('ssim_weight', String(config.ssimWeight))
+      if (Number(config.maxTrainSamples) > 0) formData.append('max_train_samples', String(config.maxTrainSamples))
+      if (Number(config.maxValSamples) > 0) formData.append('max_val_samples', String(config.maxValSamples))
+      if (validationDatasets.length) formData.append('validation_paired_data', validationDatasets.join(','))
+      if (config.resumeBest && status.best_exists) {
+        formData.append('resume', 'checkpoints/document_restorer/best.pth')
+        formData.append('resume_weights_only', 'true')
+      }
       formData.append('output', 'checkpoints/document_restorer')
 
       const token = localStorage.getItem('docai_token')
@@ -91,6 +127,42 @@
         throw new Error(err.detail || 'Gagal start training')
       }
       showToast('Training started!')
+      training = true
+      log = ''
+      logOffset = 0
+      pollTimer = setInterval(pollLog, 2000)
+      pollLog()
+    } catch(e) { showToast(e.message, 'error') }
+  }
+
+  async function runEvaluation() {
+    if (!status.best_exists) {
+      showToast('best.pth belum ada', 'error')
+      return
+    }
+    const pairedData = validationDatasets[0] || 'datasets/ShadowDocument7K/test'
+    try {
+      const formData = new FormData()
+      formData.append('paired_data', pairedData)
+      formData.append('checkpoint', 'checkpoints/document_restorer/best.pth')
+      formData.append('output', 'evaluation/document_restorer')
+      formData.append('size', String(config.size))
+      formData.append('batch_size', '1')
+      formData.append('workers', String(Math.min(Number(config.workers) || 4, 8)))
+      formData.append('device', config.device)
+      if (Number(config.maxEvalSamples) > 0) formData.append('max_samples', String(config.maxEvalSamples))
+
+      const token = localStorage.getItem('docai_token')
+      const res = await fetch('/api/training/evaluate', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+        body: formData
+      })
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}))
+        throw new Error(err.detail || 'Gagal mulai evaluasi')
+      }
+      showToast('Evaluasi dimulai')
       training = true
       log = ''
       logOffset = 0
@@ -145,7 +217,8 @@
         if (pollTimer) { clearInterval(pollTimer); pollTimer = null }
         training = false
         refreshStatus()
-        showToast('✅ Training selesai! Model tersimpan di checkpoints/document_restorer')
+        refreshEvaluation()
+        showToast('✅ Proses selesai')
       }
     } catch(e) {}
   }
@@ -162,6 +235,33 @@
       const ds = datasets.find(d => d.path === path)
       return sum + (ds ? (ds.test_count || 0) : 0)
     }, 0)
+  }
+
+  function validationPathFor(path) {
+    const ds = datasets.find(d => d.path === path)
+    if (!ds || ds.kind !== 'paired' || !ds.test_count) return ''
+    if (path.endsWith('/train')) return path.replace(/\/train$/, '/test')
+    return `${path}/test`
+  }
+
+  function applyPreset(id) {
+    selectedPreset = id
+    const preset = serverPresets.find(p => p.id === id)
+    if (!preset) return
+    config.epochs = preset.epochs
+    config.batchSize = preset.batchSize
+    config.size = preset.size
+    config.lr = preset.lr
+    config.workers = preset.workers
+    config.perceptualWeight = preset.perceptualWeight
+    config.ssimWeight = preset.ssimWeight
+    config.resumeBest = preset.resumeBest
+  }
+
+  function estimateVram(size, batchSize) {
+    const base = 0.21
+    const perSampleAt512 = 1.33
+    return base + perSampleAt512 * batchSize * Math.pow((Number(size) || 512) / 512, 2)
   }
 
   // Chart helpers
@@ -201,6 +301,20 @@
   <div>
     <div class="card">
       <h2><i data-lucide="settings"></i> Configuration</h2>
+
+      <div class="preset-grid">
+        {#each serverPresets as preset}
+          <button class="preset-card" class:active={selectedPreset === preset.id} onclick={() => applyPreset(preset.id)} type="button">
+            <span>{preset.name}</span>
+            <small>{preset.note}</small>
+          </button>
+        {/each}
+      </div>
+
+      <div class="server-advice {vramLevel}">
+        <div><strong>Estimasi VRAM</strong> {estimatedVram.toFixed(1)} / {vramTotal.toFixed(0)} GB</div>
+        <span>{vramLevel === 'safe' ? 'Aman untuk NVIDIA L4' : vramLevel === 'warning' ? 'Mepet, tutup proses GPU lain' : 'Risiko OOM, turunkan batch/size'}</span>
+      </div>
 
       <div class="form-group">
         <label>Dataset <span class="hint">(pilih satu atau lebih)</span></label>
@@ -273,6 +387,59 @@
         <input type="number" bind:value={config.baseChannels} min="8" step="8" />
       </div>
 
+      <div class="form-row">
+        <div class="form-group">
+          <label>Workers</label>
+          <input type="number" bind:value={config.workers} min="0" max="16" />
+        </div>
+        <div class="form-group">
+          <label>Device</label>
+          <select bind:value={config.device}>
+            <option value="cuda">CUDA</option>
+            <option value="auto">Auto</option>
+            <option value="cpu">CPU</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="form-row">
+        <div class="form-group">
+          <label>Perceptual Weight</label>
+          <input type="number" bind:value={config.perceptualWeight} step="0.01" min="0" />
+        </div>
+        <div class="form-group">
+          <label>SSIM Weight</label>
+          <input type="number" bind:value={config.ssimWeight} step="0.01" min="0" />
+        </div>
+      </div>
+
+      <label class="check-row">
+        <input type="checkbox" bind:checked={config.resumeBest} disabled={!status.best_exists} />
+        <span>Fine-tune dari `best.pth` dengan optimizer/LR baru</span>
+      </label>
+
+      <div class="form-row">
+        <div class="form-group">
+          <label>Max Train Samples <span class="hint">0 = semua</span></label>
+          <input type="number" bind:value={config.maxTrainSamples} min="0" />
+        </div>
+        <div class="form-group">
+          <label>Max Val Samples <span class="hint">0 = semua</span></label>
+          <input type="number" bind:value={config.maxValSamples} min="0" />
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label>Max Eval Samples <span class="hint">0 = semua</span></label>
+        <input type="number" bind:value={config.maxEvalSamples} min="0" />
+      </div>
+
+      {#if validationDatasets.length}
+        <div class="validation-note">
+          Validation otomatis: {validationDatasets.join(', ')}
+        </div>
+      {/if}
+
       <div class="form-actions">
         {#if training}
           <button class="btn btn-danger" onclick={stopTraining}>
@@ -318,6 +485,18 @@
             <span class="v eta">{status.eta}</span>
           </div>
         {/if}
+        {#if status.started_at_wib}
+          <div class="status-item">
+            <span class="k">Mulai Run</span>
+            <span class="v time-text">{status.started_at_wib}</span>
+          </div>
+        {/if}
+        {#if status.estimated_finish_wib}
+          <div class="status-item">
+            <span class="k">Estimasi Selesai</span>
+            <span class="v time-text eta">{status.estimated_finish_wib}</span>
+          </div>
+        {/if}
         <div class="status-item">
           <span class="k">Best Val Loss</span>
           <span class="v">{status.best_loss != null && status.best_loss !== Infinity ? Number(status.best_loss).toFixed(6) : '—'}</span>
@@ -347,13 +526,51 @@
       </div>
 
       {#if status.model_available_for_test}
-        <div style="margin-top:0.75rem">
+        <div class="model-actions">
           <button class="btn btn-outline" onclick={reloadAndTest}>
             <i data-lucide="test-tube"></i> Test Model (dari best.pth)
+          </button>
+          <button class="btn btn-outline" onclick={runEvaluation} disabled={training}>
+            <i data-lucide="bar-chart-3"></i> Evaluate best.pth
           </button>
         </div>
       {/if}
     </div>
+
+    {#if evaluation.exists}
+      <div class="card">
+        <h2><i data-lucide="bar-chart-3"></i> Evaluation Result</h2>
+        <div class="eval-grid">
+          <div class="status-item">
+            <span class="k">Samples</span>
+            <span class="v">{evaluation.summary?.samples || 0}</span>
+          </div>
+          <div class="status-item">
+            <span class="k">PSNR</span>
+            <span class="v">{evaluation.summary?.psnr ? Number(evaluation.summary.psnr).toFixed(2) + ' dB' : '—'}</span>
+          </div>
+          <div class="status-item">
+            <span class="k">SSIM</span>
+            <span class="v">{evaluation.summary?.ssim ? Number(evaluation.summary.ssim).toFixed(4) : '—'}</span>
+          </div>
+          <div class="status-item">
+            <span class="k">L1</span>
+            <span class="v">{evaluation.summary?.l1 ? Number(evaluation.summary.l1).toFixed(5) : '—'}</span>
+          </div>
+        </div>
+        <div class="model-actions">
+          {#if evaluation.metrics_url}
+            <a class="btn btn-outline" href={evaluation.metrics_url} target="_blank" rel="noreferrer"><i data-lucide="download"></i> Metrics CSV</a>
+          {/if}
+          <button class="btn btn-outline" onclick={refreshEvaluation}><i data-lucide="refresh-cw"></i> Refresh</button>
+        </div>
+        {#if evaluation.preview_url}
+          <div class="preview-box eval-preview">
+            <img src={evaluation.preview_url} alt="Evaluation preview" />
+          </div>
+        {/if}
+      </div>
+    {/if}
 
     {#if systemStatus}
       <div class="card">
@@ -377,9 +594,13 @@
           {#if systemStatus.gpu?.available && systemStatus.gpu?.items?.length}
             {#each systemStatus.gpu.items as gpu}
               <div class="monitor-item wide">
-                <div class="monitor-head"><span>GPU {gpu.index}: {gpu.name}</span><strong>{pct(gpu.vram_percent).toFixed(0)}%</strong></div>
-                <div class="meter"><div class="meter-fill gpu" style="width:{pct(gpu.vram_percent)}%"></div></div>
-                <div class="monitor-meta">VRAM {gpu.vram_used_gb} / {gpu.vram_total_gb} GB · free {gpu.vram_free_gb} GB</div>
+                <div class="monitor-head"><span>GPU {gpu.index}: {gpu.name}</span><strong>{pct(gpu.utilization_percent ?? gpu.vram_percent).toFixed(0)}%</strong></div>
+                <div class="meter"><div class="meter-fill gpu" style="width:{pct(gpu.utilization_percent ?? gpu.vram_percent)}%"></div></div>
+                <div class="monitor-meta">
+                  Util {gpu.utilization_percent ?? '—'}% · VRAM {gpu.vram_used_gb} / {gpu.vram_total_gb} GB ({pct(gpu.vram_percent).toFixed(0)}%) · free {gpu.vram_free_gb} GB
+                  {#if gpu.temperature_c != null} · {gpu.temperature_c}°C{/if}
+                  {#if gpu.power_draw_w != null} · {gpu.power_draw_w} / {gpu.power_limit_w} W{/if}
+                </div>
               </div>
             {/each}
           {:else}
@@ -395,7 +616,7 @@
     {#if status.latest_preview_url}
       <div class="card">
         <h2><i data-lucide="image"></i> Latest Validation Preview</h2>
-        <p class="info-text" style="margin-bottom:0.75rem">Baris: input, hasil model, target bersih, mask prediksi.</p>
+        <p class="info-text" style="margin-bottom:0.75rem">Baris: input, hasil model, target bersih, target mask, predicted mask.</p>
         <div class="preview-box">
           <img src={status.latest_preview_url} alt="Latest validation preview" />
         </div>
@@ -452,9 +673,23 @@
   .form-group { margin-bottom: 1rem; }
   .form-group label { display: flex; align-items: center; gap: 0.5rem; font-size: 0.75rem; font-weight: 700; color: var(--text2); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.375rem; }
   .form-group .hint { font-weight: 400; text-transform: none; letter-spacing: 0; color: var(--text3); font-size: 0.7rem; }
-  .form-group input { width: 100%; padding: 0.625rem 0.75rem; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-xs); color: var(--text); font-family: inherit; font-size: 0.85rem; }
-  .form-group input:focus { outline: none; border-color: var(--accent); }
+  .form-group input, .form-group select { width: 100%; padding: 0.625rem 0.75rem; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-xs); color: var(--text); font-family: inherit; font-size: 0.85rem; }
+  .form-group input:focus, .form-group select:focus { outline: none; border-color: var(--accent); }
   .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+
+  .preset-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0.625rem; margin-bottom: 1rem; }
+  .preset-card { text-align: left; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-xs); padding: 0.75rem; color: var(--text); cursor: pointer; transition: all 0.15s; }
+  .preset-card:hover, .preset-card.active { border-color: var(--accent); background: rgba(6,182,212,0.06); }
+  .preset-card span { display: block; font-size: 0.82rem; font-weight: 700; margin-bottom: 0.25rem; }
+  .preset-card small { display: block; color: var(--text3); font-size: 0.68rem; line-height: 1.35; }
+  .server-advice { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; border: 1px solid var(--border); border-radius: var(--radius-xs); padding: 0.75rem; margin-bottom: 1rem; font-size: 0.78rem; }
+  .server-advice.safe { border-color: rgba(16,185,129,0.45); background: rgba(16,185,129,0.08); }
+  .server-advice.warning { border-color: rgba(245,158,11,0.5); background: rgba(245,158,11,0.08); }
+  .server-advice.danger { border-color: rgba(239,68,68,0.55); background: rgba(239,68,68,0.08); }
+  .server-advice span { color: var(--text2); }
+  .check-row { display: flex; align-items: center; gap: 0.5rem; padding: 0.625rem 0; color: var(--text2); font-size: 0.82rem; }
+  .check-row input { width: auto; }
+  .validation-note { color: var(--text2); font-size: 0.76rem; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-xs); padding: 0.625rem 0.75rem; margin-bottom: 1rem; word-break: break-all; }
 
   /* Dataset selection */
   .dataset-list { display: flex; flex-direction: column; gap: 0.375rem; max-height: 280px; overflow-y: auto; padding: 0.25rem 0; }
@@ -488,6 +723,7 @@
 
   /* Status */
   .status-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem; }
+  .eval-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 0.75rem; margin-bottom: 0.75rem; }
   .status-item { background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-xs); padding: 0.75rem; }
   .status-item .k { display: block; font-size: 0.7rem; font-weight: 700; color: var(--text2); text-transform: uppercase; margin-bottom: 0.25rem; }
   .status-item .v { font-size: 1.1rem; font-weight: 700; }
@@ -529,13 +765,18 @@
   .progress-fill { height: 100%; background: linear-gradient(90deg, var(--primary), var(--accent)); border-radius: 999px; transition: width 0.5s ease; }
   .progress-text { font-size: 0.7rem; color: var(--text2); }
   .eta { font-size: 0.9rem; color: var(--accent) !important; font-weight: 600; }
+  .time-text { font-size: 0.86rem !important; line-height: 1.35; }
   .btn-outline { display: inline-flex; align-items: center; gap: 0.5rem; padding: 0.625rem 1.25rem; border-radius: var(--radius-xs); font-size: 0.85rem; font-weight: 600; border: 1px solid var(--accent); color: var(--accent); background: transparent; cursor: pointer; transition: all 0.15s; }
   .btn-outline:hover { background: rgba(6,182,212,0.1); }
+  .model-actions { margin-top: 0.75rem; display: flex; flex-wrap: wrap; gap: 0.625rem; }
+  .model-actions a { text-decoration: none; }
+  .eval-preview { margin-top: 0.75rem; }
 
   .footer { text-align: center; padding: 2rem 0; color: var(--text3); font-size: 0.8rem; }
 
   @media (max-width: 768px) {
     .grid-2 { grid-template-columns: 1fr; }
-    .form-row { grid-template-columns: 1fr; }
+    .form-row, .eval-grid { grid-template-columns: 1fr; }
+    .preset-grid { grid-template-columns: 1fr; }
   }
 </style>

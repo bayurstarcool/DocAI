@@ -89,12 +89,20 @@ def ssim_score(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     return 1.0 - ssim_loss(pred.clamp(0, 1), target.clamp(0, 1))
 
 
-def save_validation_preview(output_dir: Path, epoch: int, source: torch.Tensor, restored: torch.Tensor, target: torch.Tensor, mask: torch.Tensor):
+def save_validation_preview(output_dir: Path, epoch: int, source: torch.Tensor, restored: torch.Tensor, target: torch.Tensor,
+                            target_mask: torch.Tensor, predicted_mask: torch.Tensor):
     preview_dir = output_dir / 'previews'
     preview_dir.mkdir(parents=True, exist_ok=True)
     count = min(4, source.shape[0])
-    mask_rgb = mask[:count].repeat(1, 3, 1, 1)
-    rows = torch.cat((source[:count].cpu(), restored[:count].cpu(), target[:count].cpu(), mask_rgb.cpu()), dim=0)
+    target_mask_rgb = target_mask[:count].repeat(1, 3, 1, 1)
+    predicted_mask_rgb = predicted_mask[:count].repeat(1, 3, 1, 1)
+    rows = torch.cat((
+        source[:count].cpu(),
+        restored[:count].cpu(),
+        target[:count].cpu(),
+        target_mask_rgb.cpu(),
+        predicted_mask_rgb.cpu(),
+    ), dim=0)
     save_image(rows.clamp(0, 1), preview_dir / f'epoch_{epoch:04d}.png', nrow=count)
 
 
@@ -116,6 +124,8 @@ def parse_args():
     parser.add_argument('--log-interval', type=int, default=25)
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--resume')
+    parser.add_argument('--resume-weights-only', action='store_true',
+                        help='Load model weights from --resume but start a fresh optimizer/scheduler run')
     parser.add_argument('--max-train-samples', type=int)
     parser.add_argument('--max-validation-samples', type=int)
     parser.add_argument('--device', choices=['auto', 'cpu', 'cuda'], default='auto')
@@ -247,11 +257,23 @@ def main():
 
     if args.resume:
         checkpoint = torch.load(args.resume, map_location=device, weights_only=False)
-        model.load_state_dict(checkpoint['model'], strict=False)
-        optimizer.load_state_dict(checkpoint['optimizer'])
-        start_epoch = checkpoint['epoch'] + 1
-        best_loss = checkpoint['best_loss']
-        print(f'Resumed from epoch {start_epoch}, best_loss={best_loss:.4f}')
+        model_state = checkpoint.get('model') or checkpoint.get('model_state_dict') or checkpoint
+        model.load_state_dict(model_state, strict=False)
+        if args.resume_weights_only:
+            print(f'Loaded weights from {args.resume}; starting fresh fine-tune run')
+        else:
+            if 'optimizer' in checkpoint:
+                optimizer.load_state_dict(checkpoint['optimizer'])
+            elif 'optimizer_state_dict' in checkpoint:
+                optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            if 'scheduler' in checkpoint:
+                scheduler.load_state_dict(checkpoint['scheduler'])
+            elif 'scheduler_state_dict' in checkpoint:
+                scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+            start_epoch = checkpoint.get('epoch', -1) + 1
+            best_loss = checkpoint.get('best_loss', checkpoint.get('best_val_loss', best_loss))
+            history = checkpoint.get('history', history)
+            print(f'Resumed from epoch {start_epoch}, best_loss={best_loss:.4f}')
 
     print(f'train_pairs={len(train_set)} validation_pairs={len(validation_set)} device={device}')
     print(f'perceptual_weight={args.perceptual_weight} ssim_weight={args.ssim_weight}')
@@ -291,6 +313,7 @@ def main():
         validation_loss = 0.0
         validation_psnr = 0.0
         validation_ssim = 0.0
+        validation_samples = 0
         preview_saved = False
         with torch.inference_mode():
             for batch in validation_loader:
@@ -298,16 +321,18 @@ def main():
                 target = batch['target'].to(device, non_blocking=True)
                 mask = batch['mask'].to(device, non_blocking=True)
                 restored, predicted_mask = model(source)
-                validation_loss += loss_fn(restored, predicted_mask, target, mask, include_tv=False)[0].item()
-                validation_psnr += psnr_score(restored, target).item()
-                validation_ssim += ssim_score(restored, target).item()
+                batch_size = source.shape[0]
+                validation_loss += loss_fn(restored, predicted_mask, target, mask, include_tv=False)[0].item() * batch_size
+                validation_psnr += psnr_score(restored, target).item() * batch_size
+                validation_ssim += ssim_score(restored, target).item() * batch_size
+                validation_samples += batch_size
                 if not preview_saved:
-                    save_validation_preview(output_dir, epoch + 1, source, restored, target, predicted_mask)
+                    save_validation_preview(output_dir, epoch + 1, source, restored, target, mask, predicted_mask)
                     preview_saved = True
 
-        validation_loss /= len(validation_loader)
-        validation_psnr /= len(validation_loader)
-        validation_ssim /= len(validation_loader)
+        validation_loss /= validation_samples
+        validation_psnr /= validation_samples
+        validation_ssim /= validation_samples
         scheduler.step()
 
         history['train_loss'].append(train_loss / len(train_loader))
@@ -316,18 +341,21 @@ def main():
         history['val_ssim'].append(validation_ssim)
         (output_dir / 'training_history.json').write_text(json.dumps(history), encoding='utf-8')
 
+        if validation_loss < best_loss:
+            best_loss = validation_loss
+
         checkpoint = {
             'model': model.state_dict(),
             'optimizer': optimizer.state_dict(),
+            'scheduler': scheduler.state_dict(),
             'epoch': epoch,
             'best_loss': best_loss,
+            'history': history,
             'args': vars(args),
         }
         torch.save(checkpoint, output_dir / 'last.pth')
 
-        if validation_loss < best_loss:
-            best_loss = validation_loss
-            checkpoint['best_loss'] = best_loss
+        if validation_loss <= best_loss:
             torch.save(checkpoint, output_dir / 'best.pth')
 
         epoch_elapsed = time.time() - epoch_start_time
