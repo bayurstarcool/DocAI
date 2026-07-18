@@ -298,6 +298,56 @@ async def models_info(request: Request):
     return info
 
 
+@app.get("/api/system/status")
+async def system_status(request: Request):
+    require_api_auth(request)
+    try:
+        import psutil
+        memory = psutil.virtual_memory()
+        disk = psutil.disk_usage(str(BASE_DIR))
+        load_average = os.getloadavg() if hasattr(os, 'getloadavg') else None
+        status = {
+            'time': time.time(),
+            'cpu': {
+                'percent': psutil.cpu_percent(interval=0.05),
+                'count': psutil.cpu_count(),
+                'load_average': list(load_average) if load_average else None,
+            },
+            'ram': {
+                'total_gb': round(memory.total / 1e9, 2),
+                'used_gb': round(memory.used / 1e9, 2),
+                'available_gb': round(memory.available / 1e9, 2),
+                'percent': memory.percent,
+            },
+            'disk': {
+                'total_gb': round(disk.total / 1e9, 2),
+                'used_gb': round(disk.used / 1e9, 2),
+                'free_gb': round(disk.free / 1e9, 2),
+                'percent': disk.percent,
+            },
+            'gpu': {
+                'available': torch.cuda.is_available(),
+                'count': torch.cuda.device_count() if torch.cuda.is_available() else 0,
+                'items': [],
+            },
+        }
+        if torch.cuda.is_available():
+            for index in range(torch.cuda.device_count()):
+                free, total = torch.cuda.mem_get_info(index)
+                used = total - free
+                status['gpu']['items'].append({
+                    'index': index,
+                    'name': torch.cuda.get_device_name(index),
+                    'vram_total_gb': round(total / 1e9, 2),
+                    'vram_used_gb': round(used / 1e9, 2),
+                    'vram_free_gb': round(free / 1e9, 2),
+                    'vram_percent': round((used / total) * 100, 2) if total else 0,
+                })
+        return status
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=f'System status failed: {error}')
+
+
 # =====================================================================
 #  CORE SCANNING ENDPOINTS
 # =====================================================================

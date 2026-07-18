@@ -10,7 +10,9 @@
   let log = ''
   let logOffset = 0
   let pollTimer = null
+  let systemTimer = null
   let training = false
+  let systemStatus = null
 
   const config = { epochs: 100, batchSize: 8, size: 512, lr: 0.0002, baseChannels: 32 }
 
@@ -18,9 +20,14 @@
     refreshIcons()
     await loadDatasets()
     await refreshStatus()
+    await refreshSystemStatus()
+    systemTimer = setInterval(refreshSystemStatus, 2000)
   })
 
-  onDestroy(() => { if (pollTimer) clearInterval(pollTimer) })
+  onDestroy(() => {
+    if (pollTimer) clearInterval(pollTimer)
+    if (systemTimer) clearInterval(systemTimer)
+  })
 
   async function loadDatasets() {
     try {
@@ -36,6 +43,16 @@
       status = await apiJson('/api/training/status')
       training = status.running
     } catch(e) {}
+  }
+
+  async function refreshSystemStatus() {
+    try {
+      systemStatus = await apiJson('/api/system/status')
+    } catch(e) {}
+  }
+
+  function pct(value) {
+    return Math.max(0, Math.min(100, Number(value) || 0))
   }
 
   function toggleDataset(path) {
@@ -338,6 +355,43 @@
       {/if}
     </div>
 
+    {#if systemStatus}
+      <div class="card">
+        <h2><i data-lucide="gauge"></i> System Monitor</h2>
+        <div class="monitor-grid">
+          <div class="monitor-item">
+            <div class="monitor-head"><span>CPU</span><strong>{pct(systemStatus.cpu?.percent).toFixed(0)}%</strong></div>
+            <div class="meter"><div class="meter-fill cpu" style="width:{pct(systemStatus.cpu?.percent)}%"></div></div>
+            <div class="monitor-meta">{systemStatus.cpu?.count || 0} cores{systemStatus.cpu?.load_average ? ` · load ${systemStatus.cpu.load_average[0].toFixed(2)}` : ''}</div>
+          </div>
+          <div class="monitor-item">
+            <div class="monitor-head"><span>RAM</span><strong>{pct(systemStatus.ram?.percent).toFixed(0)}%</strong></div>
+            <div class="meter"><div class="meter-fill ram" style="width:{pct(systemStatus.ram?.percent)}%"></div></div>
+            <div class="monitor-meta">{systemStatus.ram?.used_gb} / {systemStatus.ram?.total_gb} GB · free {systemStatus.ram?.available_gb} GB</div>
+          </div>
+          <div class="monitor-item">
+            <div class="monitor-head"><span>Disk</span><strong>{pct(systemStatus.disk?.percent).toFixed(0)}%</strong></div>
+            <div class="meter"><div class="meter-fill disk" style="width:{pct(systemStatus.disk?.percent)}%"></div></div>
+            <div class="monitor-meta">{systemStatus.disk?.used_gb} / {systemStatus.disk?.total_gb} GB · free {systemStatus.disk?.free_gb} GB</div>
+          </div>
+          {#if systemStatus.gpu?.available && systemStatus.gpu?.items?.length}
+            {#each systemStatus.gpu.items as gpu}
+              <div class="monitor-item wide">
+                <div class="monitor-head"><span>GPU {gpu.index}: {gpu.name}</span><strong>{pct(gpu.vram_percent).toFixed(0)}%</strong></div>
+                <div class="meter"><div class="meter-fill gpu" style="width:{pct(gpu.vram_percent)}%"></div></div>
+                <div class="monitor-meta">VRAM {gpu.vram_used_gb} / {gpu.vram_total_gb} GB · free {gpu.vram_free_gb} GB</div>
+              </div>
+            {/each}
+          {:else}
+            <div class="monitor-item wide muted">
+              <div class="monitor-head"><span>GPU</span><strong>Not available</strong></div>
+              <div class="monitor-meta">Training akan pakai CPU jika CUDA tidak tersedia.</div>
+            </div>
+          {/if}
+        </div>
+      </div>
+    {/if}
+
     {#if status.latest_preview_url}
       <div class="card">
         <h2><i data-lucide="image"></i> Latest Validation Preview</h2>
@@ -437,6 +491,22 @@
   .status-item { background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-xs); padding: 0.75rem; }
   .status-item .k { display: block; font-size: 0.7rem; font-weight: 700; color: var(--text2); text-transform: uppercase; margin-bottom: 0.25rem; }
   .status-item .v { font-size: 1.1rem; font-weight: 700; }
+
+  /* Monitor */
+  .monitor-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem; }
+  .monitor-item { background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-xs); padding: 0.85rem; }
+  .monitor-item.wide { grid-column: 1 / -1; }
+  .monitor-item.muted { opacity: 0.7; }
+  .monitor-head { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; margin-bottom: 0.6rem; }
+  .monitor-head span { font-size: 0.75rem; font-weight: 700; color: var(--text2); text-transform: uppercase; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .monitor-head strong { font-size: 1rem; color: var(--text); }
+  .monitor-meta { margin-top: 0.5rem; font-size: 0.7rem; color: var(--text3); }
+  .meter { height: 7px; background: var(--bg3); border-radius: 999px; overflow: hidden; }
+  .meter-fill { height: 100%; border-radius: 999px; transition: width 0.5s ease; }
+  .meter-fill.cpu { background: linear-gradient(90deg, #06b6d4, #3b82f6); }
+  .meter-fill.ram { background: linear-gradient(90deg, #8b5cf6, #6366f1); }
+  .meter-fill.disk { background: linear-gradient(90deg, #f59e0b, #f97316); }
+  .meter-fill.gpu { background: linear-gradient(90deg, #10b981, #22c55e); }
 
   /* Chart */
   .chart-wrap { background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-xs); padding: 1rem; }
