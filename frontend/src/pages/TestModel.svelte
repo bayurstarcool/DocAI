@@ -114,20 +114,6 @@
             : 'Model lokal dan mode enhancement DocAI.'}
         </p>
       </div>
-      <div class="mode-pills">
-        {#each modes as m}
-          <button class="pill" class:active={selectedMode === m} onclick={() => selectedMode = m}>
-            {allModeLabels[m]}
-          </button>
-        {/each}
-      </div>
-      <div class="mode-pills pretrained-pills">
-        {#each docshadowModes as m}
-          <button class="pill pretrained" class:active={selectedMode === m} disabled={!availableDocshadowNames.has(m.split(':')[1])} onclick={() => selectedMode = m}>
-            {allModeLabels[m]}
-          </button>
-        {/each}
-      </div>
       <div style="margin-top:1rem;display:flex;align-items:center;gap:0.75rem">
         <button class="btn btn-primary" onclick={runTest} disabled={!selectedFile || processing}>
           {#if processing}<div class="spinner" style="width:16px;height:16px;border-width:2px"></div>{:else}<i data-lucide="play"></i>{/if}
