@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="id">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Doc Shadow AI · Training</title>
+  <style>
+    :root{color-scheme:dark;--bg:#070d1a;--panel:#101a30;--panel2:#0b1426;--text:#eef2f9;--muted:#9fb0c9;--line:#27344f;--brand:#46c3ff;--brand2:#7c5cff;--ok:#22c55e;--warn:#f59e0b;--bad:#ef4444;--r:16px}
+    *{box-sizing:border-box}html,body{margin:0}body{background:radial-gradient(1200px 600px at 100% -10%,#15224a 0,#070d1a 60%);font-family:Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif;color:var(--text);-webkit-text-size-adjust:100%}
+    a{color:var(--brand);text-decoration:none}
+    .wrap{max-width:1280px;margin:0 auto;padding:clamp(14px,3vw,26px)}
+    .topbar{display:flex;flex-wrap:wrap;gap:12px;align-items:center;justify-content:space-between;margin-bottom:18px}
+    .brand h1{margin:0;font-size:clamp(20px,3.6vw,30px);letter-spacing:.2px}
+    .brand p{margin:4px 0 0;color:var(--muted);font-size:13px}
+    nav{display:flex;gap:8px;flex-wrap:wrap}
+    nav a{padding:9px 13px;border:1px solid var(--line);border-radius:999px;background:var(--panel2);font-weight:700;font-size:13px}
+    nav a.active{background:linear-gradient(120deg,var(--brand),var(--brand2));color:#04111f;border-color:transparent}
+    .sysmon{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:18px}
+    .sysmon .cell{background:linear-gradient(180deg,var(--panel),var(--panel2));border:1px solid var(--line);border-radius:14px;padding:14px}
+    .sysmon span{display:block;font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.12em;margin-bottom:6px}
+    .sysmon b{font-size:clamp(15px,2.4vw,20px);display:block;font-variant-numeric:tabular-nums}
+    .bar{height:6px;background:#1b2740;border-radius:6px;margin-top:10px;overflow:hidden}.fill{height:100%;width:0;background:linear-gradient(90deg,var(--brand),var(--brand2));transition:width .4s ease}
+    main{display:grid;grid-template-columns:minmax(0,420px) minmax(0,1fr);gap:18px;align-items:start}
+    section{background:linear-gradient(180deg,rgba(16,26,48,.96),rgba(11,20,38,.96));border:1px solid var(--line);border-radius:var(--r);box-shadow:0 24px 70px rgba(0,0,0,.35)}
+    .card{padding:clamp(14px,2.4vw,20px)}h2{font-size:16px;margin:0 0 14px}
+    .grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}.full{grid-column:1/-1}
+    label{display:block;font-size:12px;color:var(--muted);margin:0 0 6px}
+    input,select{width:100%;border:1px solid var(--line);background:var(--panel2);color:var(--text);border-radius:10px;padding:11px 12px;outline:none;font-size:14px}
+    input:focus,select:focus{border-color:var(--brand);box-shadow:0 0 0 3px rgba(70,195,255,.16)}
+    .check{display:flex;align-items:center;gap:8px;margin-top:10px}.check input{width:auto}
+    .actions{display:flex;gap:10px;margin-top:16px;flex-wrap:wrap} button{flex:1 1 auto;min-width:120px;border:0;border-radius:12px;padding:12px 14px;color:#04111f;background:linear-gradient(120deg,var(--brand),var(--brand2));font-weight:800;cursor:pointer;font-size:14px} button.secondary{background:#2b3a57;color:var(--text)} button.stop{background:var(--bad);color:#fff} button:disabled{opacity:.5;cursor:not-allowed}
+    .status{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:14px}.metric{background:var(--panel2);border:1px solid var(--line);border-radius:14px;padding:12px;text-align:center}.metric b{display:block;font-size:clamp(16px,2.6vw,22px);font-variant-numeric:tabular-nums}.metric span{color:var(--muted);font-size:11px}
+    .pill{display:inline-flex;align-items:center;gap:8px;border:1px solid var(--line);border-radius:999px;padding:8px 13px;background:var(--panel2);color:var(--muted);font-size:13px;font-weight:700}.dot{width:9px;height:9px;border-radius:50%;background:var(--muted)}.running .dot{background:var(--ok);box-shadow:0 0 14px var(--ok)}.failed .dot,.stopped .dot{background:var(--bad)}.completed .dot{background:var(--brand)}
+    pre{height:clamp(240px,42vh,440px);overflow:auto;margin:12px 0 0;padding:14px;border-radius:14px;background:#040813;border:1px solid var(--line);color:#cbd5e1;font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;white-space:pre-wrap;word-break:break-word}
+    details{margin-top:14px;border:1px solid var(--line);border-radius:14px;background:var(--panel2);overflow:hidden}summary{cursor:pointer;padding:13px 14px;font-weight:800;color:var(--text)}details[open]{padding-bottom:14px}details pre,details .tablewrap{margin:0 14px}
+    .tablewrap{overflow-x:auto;-webkit-overflow-scrolling:touch}table{width:100%;border-collapse:collapse;margin-top:12px;font-size:13px;min-width:420px}th,td{padding:9px;border-bottom:1px solid var(--line);text-align:left}th{color:var(--muted);font-weight:600}
+    .cmd{color:var(--muted);font-size:12px;word-break:break-all;margin-top:8px;background:#040813;border:1px solid var(--line);border-radius:10px;padding:10px}.small{font-size:12px;color:var(--muted);margin-top:10px}
+    @media(max-width:1024px){main{grid-template-columns:1fr}}
+    @media(max-width:680px){.sysmon{grid-template-columns:1fr 1fr}.status{grid-template-columns:1fr 1fr}.grid{grid-template-columns:1fr}}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="topbar">
+      <div class="brand"><h1>Doc Shadow AI · Training</h1><p>Start/stop training, monitor hardware, pantau log & checkpoint.</p></div>
+      <nav><a class="active" href="/train-ui/">Training</a><a href="/dataset-ui/">Dataset</a><a href="/studio/">Studio</a></nav>
+    </div>
+
+    <div class="sysmon">
+      <div class="cell"><span>CPU</span><b id="sys-cpu">-</b><div class="bar"><div id="sys-cpub" class="fill"></div></div></div>
+      <div class="cell"><span>RAM</span><b id="sys-ram">-</b><div class="bar"><div id="sys-ramb" class="fill"></div></div></div>
+      <div class="cell"><span>GPU Compute</span><b id="sys-gpu">-</b><div class="bar"><div id="sys-gpub" class="fill"></div></div></div>
+      <div class="cell"><span>GPU VRAM</span><b id="sys-vram">-</b><div class="bar"><div id="sys-vramb" class="fill"></div></div></div>
+    </div>
+
+    <main>
+      <section class="card">
+        <h2>Training Params</h2>
+        <div class="grid">
+          <div class="full"><label>Clean data folder (fallback jika paired kosong)</label><input id="data" value="data/open_docs_clean"></div>
+          <div><label>Epochs</label><input id="epochs" type="number" value="80" min="1"></div>
+          <div><label>Batch</label><input id="batch" type="number" value="8" min="1"></div>
+          <div><label>Image size</label><input id="size" type="number" value="512" min="64" step="32"></div>
+          <div><label>Base channels</label><input id="base" type="number" value="32" min="8" step="8"></div>
+          <div><label>Learning rate</label><input id="lr" value="0.0002"></div>
+          <div><label>Workers</label><input id="workers" type="number" value="4" min="0"></div>
+          <div><label>Grad accum</label><input id="grad_accum" type="number" value="1" min="1"></div>
+          <div><label>Device</label><select id="device"><option value="cuda" selected>cuda/rocm</option><option value="cpu">cpu</option></select></div>
+          <div><label>CPU threads</label><input id="threads" type="number" value="8" min="1"></div>
+          <div class="full"><label>Output folder</label><input id="out" value="runs/prod_v1"></div>
+          <div class="full"><label>Resume checkpoint (optional)</label><input id="resume" placeholder="runs/prod_v1/last.pth"></div>
+          <div class="full"><label>Paired shadow folder</label><input id="paired_shadow" value="data/open_pairs/shadow"></div>
+          <div class="full"><label>Paired clean folder</label><input id="paired_clean" value="data/open_pairs/clean"></div>
+          <div class="full"><label>Paired mask folder</label><input id="paired_mask" value="data/open_pairs/mask"></div>
+          <label class="check full"><input id="amp" type="checkbox" checked> Enable AMP when GPU available</label>
+        </div>
+        <div class="actions">
+          <button id="start">Start Training</button>
+          <button id="stop" class="stop">Stop</button>
+          <button id="refresh" class="secondary">Refresh</button>
+        </div>
+        <p class="small">Default pakai dataset <b>data/open_pairs</b> (1200 pair) + GPU ROCm. Smoke test cepat: epochs=3, batch=2, size=256, base=16.</p>
+      </section>
+      <section class="card">
+        <div id="state" class="pill"><span class="dot"></span><span>idle</span></div>
+        <div class="cmd" id="cmd"></div>
+        <div class="status" style="margin-top:14px">
+          <div class="metric"><b id="epoch">-</b><span>epoch</span></div>
+          <div class="metric"><b id="loss">-</b><span>train loss</span></div>
+          <div class="metric"><b id="psnr">-</b><span>val PSNR</span></div>
+          <div class="metric"><b id="best">-</b><span>best</span></div>
+        </div>
+        <details>
+          <summary>Live Log</summary>
+          <pre id="log">Memuat status...</pre>
+        </details>
+        <details>
+          <summary>Checkpoints</summary>
+          <div class="tablewrap"><table><thead><tr><th>Path</th><th>Size</th><th>Modified</th></tr></thead><tbody id="ckpts"></tbody></table></div>
+        </details>
+      </section>
+    </main>
+  </div>
+  <script>
+    const $ = id => document.getElementById(id);
+    const fields = ['data','epochs','batch','size','base','lr','workers','grad_accum','device','threads','out','resume','paired_shadow','paired_clean','paired_mask'];
+    function payload(){ const p={amp:$('amp').checked}; for(const id of fields){ const el=$(id); p[id]=el.type==='number'?Number(el.value):el.value.trim(); } return p; }
+    function fmtSize(n){ if(!n) return '0 B'; const u=['B','KB','MB','GB']; let i=0; while(n>1024&&i<u.length-1){n/=1024;i++} return `${n.toFixed(i?1:0)} ${u[i]}`; }
+    async function status(){
+      try{
+        const r = await fetch('/train/status');
+        if(!r.ok) throw new Error(`HTTP ${r.status}`);
+        const s = await r.json();
+        render(s);
+        return s;
+      }catch(e){
+        $('log').textContent=`Status gagal dimuat: ${e.message}`;
+        return null;
+      }
+    }
+    function render(s){
+      const state=$('state'); state.className='pill '+s.status; state.lastElementChild.textContent=s.status;
+      $('cmd').textContent = (s.cmd||[]).join(' ');
+      const m=s.metrics||{}; $('epoch').textContent=m.epoch??'-'; $('loss').textContent=m.train_loss??'-'; $('psnr').textContent=m.val_psnr??'-'; $('best').textContent=m.best??'-';
+      let filteredLogs=(s.logs||[]).filter(line=>!line.includes('NNPACK.cpp') && !line.includes('Could not initialize NNPACK'));
+      if(filteredLogs.length===0){
+        const m=s.metrics||{};
+        filteredLogs=[`Log noise hidden. Status: ${s.status}.`, `Epoch: ${m.epoch??'-'} | Loss: ${m.train_loss??'-'} | Val PSNR: ${m.val_psnr??'-'} | Best: ${m.best??'-'}`];
+      }
+      $('log').textContent=filteredLogs.join('\n'); $('log').scrollTop=$('log').scrollHeight;
+      const checkpoints=s.checkpoints||[];
+      $('ckpts').innerHTML=checkpoints.length?checkpoints.map(c=>`<tr><td>${c.path}</td><td>${fmtSize(c.size)}</td><td>${new Date(c.mtime*1000).toLocaleString()}</td></tr>`).join(''):'<tr><td colspan="3">Belum ada checkpoint.</td></tr>';
+      $('start').disabled=s.status==='running'||s.status==='stopping'; $('stop').disabled=s.status!=='running';
+    }
+    $('start').onclick = async () => { const r=await fetch('/train/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload())}); render(await r.json()); };
+    $('stop').onclick = async () => render(await (await fetch('/train/stop',{method:'POST'})).json());
+    $('refresh').onclick = status;
+    async function pollSys(){
+      try{
+        const r=await fetch('/system/status'); if(!r.ok) return; const s=await r.json();
+        $('sys-cpu').textContent=s.cpu.percent+'%'; $('sys-cpub').style.width=s.cpu.percent+'%';
+        $('sys-ram').textContent=`${s.ram.used_gb} / ${s.ram.total_gb} GB`; $('sys-ramb').style.width=s.ram.percent+'%';
+        if(s.gpu.available && s.gpu.items.length>0){
+          const gpu=s.gpu.items[0]; const bp=s.gpu.busy_percent!=null?s.gpu.busy_percent:0;
+          $('sys-gpu').textContent=bp+'%'; $('sys-gpub').style.width=bp+'%';
+          $('sys-vram').textContent=`${gpu.vram_used_gb} / ${gpu.vram_total_gb} GB`; $('sys-vramb').style.width=gpu.vram_percent+'%';
+        }else{ $('sys-gpu').textContent='N/A'; $('sys-vram').textContent='N/A'; }
+      }catch(e){}
+    }
+    status(); setInterval(status, 2000);
+    pollSys(); setInterval(pollSys, 2000);
+  </script>
+</body>
+</html>

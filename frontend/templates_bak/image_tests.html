@@ -1,0 +1,324 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DocAI - Image Tests</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+<script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>
+<style>
+:root{--primary:#6366f1;--bg:#09090b;--bg2:#0f0f12;--bg3:#18181b;--surface:#27272a;--border:#27272a;--text:#fafafa;--text2:#a1a1aa;--text3:#71717a;--accent:#06b6d4;--accent2:#22d3ee;--success:#10b981;--warning:#f59e0b;--error:#ef4444;--gradient-1:linear-gradient(135deg,#6366f1,#06b6d4);--radius:16px;--radius-sm:12px;--radius-xs:8px}
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'Inter',-apple-system,sans-serif;background:var(--bg);color:var(--text);min-height:100vh}
+.bg-grid{position:fixed;inset:0;z-index:0;pointer-events:none;background-image:radial-gradient(circle at 1px 1px,rgba(99,102,241,0.06) 1px,transparent 0);background-size:40px 40px}
+
+/* Navbar */
+.navbar{position:sticky;top:0;z-index:100;background:rgba(9,9,11,0.75);backdrop-filter:blur(16px);border-bottom:1px solid var(--border)}
+.nav-inner{max-width:1280px;margin:0 auto;padding:0 1.5rem;height:64px;display:flex;align-items:center;justify-content:space-between}
+.logo{display:flex;align-items:center;gap:0.625rem;text-decoration:none}
+.logo-mark{width:36px;height:36px;background:var(--gradient-1);border-radius:10px;display:grid;place-items:center;color:white}
+.logo-mark i{width:20px;height:20px}
+.logo-text{font-size:1.125rem;font-weight:700;color:var(--text)}
+.nav-links{display:flex;gap:0.25rem}
+.nav-links a{color:var(--text2);text-decoration:none;font-weight:500;font-size:0.875rem;padding:0.5rem 0.875rem;border-radius:var(--radius-xs);transition:all 0.15s;display:flex;align-items:center;gap:0.5rem}
+.nav-links a i{width:16px;height:16px}
+.nav-links a:hover{color:var(--text);background:var(--bg3)}
+.nav-links a.active{color:var(--accent2);background:rgba(6,182,212,0.1)}
+.nav-right{display:flex;align-items:center;gap:0.75rem}
+.user-chip{display:flex;align-items:center;gap:0.5rem;padding:0.375rem 0.75rem 0.375rem 0.375rem;background:var(--bg3);border:1px solid var(--border);border-radius:999px}
+.user-avatar{width:28px;height:28px;background:linear-gradient(135deg,#8b5cf6,#ec4899);border-radius:50%;display:grid;place-items:center;color:white}
+.user-avatar i{width:14px;height:14px}
+.user-chip span{font-size:0.8rem;font-weight:500}
+.btn-logout{display:flex;align-items:center;padding:0.5rem;background:transparent;border:1px solid var(--border);border-radius:var(--radius-xs);color:var(--text2);cursor:pointer;transition:all 0.15s}
+.btn-logout i{width:16px;height:16px}
+.btn-logout:hover{border-color:var(--error);color:var(--error)}
+.nav-toggle{display:none;background:none;border:1px solid var(--border);color:var(--text2);cursor:pointer;padding:0.5rem;border-radius:var(--radius-xs)}
+.nav-toggle i{width:20px;height:20px}
+.nav-mobile{display:none;position:absolute;top:64px;left:0;right:0;background:var(--bg2);border-bottom:1px solid var(--border);padding:0.75rem;z-index:200}
+.nav-mobile.open{display:block}
+.nav-mobile a{display:flex;align-items:center;gap:0.75rem;padding:0.75rem 1rem;color:var(--text2);text-decoration:none;border-radius:var(--radius-xs);font-weight:500;font-size:0.9rem}
+.nav-mobile a i{width:18px;height:18px}
+.nav-mobile a:hover{background:var(--bg3);color:var(--text)}
+.nav-mobile a.active{color:var(--accent2);background:rgba(6,182,212,0.1)}
+@media(max-width:768px){.nav-links{display:none!important}.nav-toggle{display:flex}.user-chip .user-name{display:none}}
+
+/* Layout */
+.container{max-width:1280px;margin:0 auto;padding:2rem 1.5rem;position:relative;z-index:1}
+.page-header{margin-bottom:2rem}
+.page-header h1{font-size:1.5rem;font-weight:700}
+.page-header p{color:var(--text2);margin-top:0.25rem;font-size:0.9rem}
+
+/* Sidebar + Content */
+.layout{display:grid;grid-template-columns:260px 1fr;gap:1.5rem}
+@media(max-width:900px){.layout{grid-template-columns:1fr}}
+
+/* Sidebar */
+.sidebar{background:var(--bg3);border:1px solid var(--border);border-radius:var(--radius);padding:1rem;position:sticky;top:80px;height:fit-content;max-height:calc(100vh - 100px);overflow-y:auto}
+.sidebar h3{font-size:0.75rem;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:0.75rem}
+.folder-btn{width:100%;text-align:left;padding:0.75rem;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius-xs);color:var(--text2);cursor:pointer;font-family:inherit;font-size:0.85rem;display:flex;align-items:center;gap:0.75rem;transition:all 0.15s;margin-bottom:0.5rem}
+.folder-btn:hover{border-color:var(--accent);color:var(--text)}
+.folder-btn.active{border-color:var(--accent);color:var(--accent2);background:rgba(6,182,212,0.05)}
+.folder-btn i{width:18px;height:18px;color:var(--warning);flex-shrink:0}
+.folder-btn .count{margin-left:auto;font-size:0.7rem;background:var(--bg3);padding:0.125rem 0.5rem;border-radius:999px}
+
+/* Content */
+.content{background:var(--bg3);border:1px solid var(--border);border-radius:var(--radius);padding:1.5rem}
+.toolbar{display:flex;align-items:center;gap:0.75rem;margin-bottom:1rem;flex-wrap:wrap}
+.toolbar select{padding:0.5rem 0.75rem;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius-xs);color:var(--text);font-family:inherit;font-size:0.8rem}
+.toolbar select:focus{outline:none;border-color:var(--accent)}
+.btn{display:inline-flex;align-items:center;gap:0.5rem;padding:0.5rem 1rem;border-radius:var(--radius-xs);font-size:0.8rem;font-weight:600;cursor:pointer;border:none;font-family:inherit;transition:all 0.15s}
+.btn i{width:16px;height:16px}
+.btn-primary{background:var(--primary);color:white}
+.btn-primary:hover{background:#5558e6}
+.btn-primary:disabled{opacity:0.5;cursor:not-allowed}
+.btn-secondary{background:var(--surface);color:var(--text);border:1px solid var(--border)}
+.btn-secondary:hover{border-color:var(--text3)}
+.file-count{font-size:0.8rem;color:var(--text3);margin-left:auto}
+
+/* File Grid */
+.file-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:0.75rem}
+.file-card{background:var(--bg);border:1px solid var(--border);border-radius:var(--radius-xs);overflow:hidden;cursor:pointer;transition:all 0.15s}
+.file-card:hover{border-color:var(--accent);transform:translateY(-2px);box-shadow:0 8px 24px rgba(0,0,0,0.3)}
+.file-card img{width:100%;aspect-ratio:3/4;object-fit:cover;display:block;background:var(--surface)}
+.file-card .info{padding:0.625rem 0.75rem;font-size:0.75rem;color:var(--text2);display:flex;justify-content:space-between;align-items:center}
+.file-card .info .name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:70%}
+.folder-card{display:flex;align-items:center;gap:0.75rem;padding:1rem}
+.folder-card i{width:32px;height:32px;color:var(--warning);flex-shrink:0}
+.folder-card .name{font-size:0.85rem;font-weight:500}
+.empty-state{display:flex;flex-direction:column;align-items:center;justify-content:center;padding:4rem 0;color:var(--text3);gap:0.75rem}
+.empty-state i{width:48px;height:48px;opacity:0.3}
+
+/* Breadcrumb */
+.breadcrumb{display:flex;align-items:center;gap:0.25rem;margin-bottom:1rem;flex-wrap:wrap}
+.breadcrumb button{background:none;border:none;color:var(--accent2);cursor:pointer;font-size:0.8rem;font-weight:500;padding:0.25rem 0.375rem;border-radius:4px;font-family:inherit}
+.breadcrumb button:hover{background:rgba(6,182,212,0.1)}
+.breadcrumb span{color:var(--text3);font-size:0.8rem}
+
+/* Lightbox */
+.lightbox{display:none;position:fixed;inset:0;background:rgba(0,0,0,0.92);z-index:600;flex-direction:column;align-items:center;justify-content:center}
+.lightbox.open{display:flex}
+.lightbox-close{position:absolute;top:1rem;right:1rem;background:rgba(255,255,255,0.1);border:none;color:white;cursor:pointer;padding:0.5rem;border-radius:var(--radius-xs);z-index:10}
+.lightbox-close:hover{background:rgba(255,255,255,0.2)}
+.lightbox-close i{width:24px;height:24px}
+.lightbox-nav{position:absolute;top:50%;transform:translateY(-50%);background:rgba(255,255,255,0.1);border:none;color:white;cursor:pointer;padding:1rem;border-radius:var(--radius-xs)}
+.lightbox-nav:hover{background:rgba(255,255,255,0.2)}
+.lightbox-nav i{width:24px;height:24px}
+.lightbox-nav.prev{left:1rem}
+.lightbox-nav.next{right:1rem}
+.lightbox-img{max-width:90vw;max-height:85vh;object-fit:contain;border-radius:4px;transition:transform 0.2s;cursor:zoom-in}
+.lightbox-info{position:absolute;bottom:1rem;color:rgba(255,255,255,0.7);font-size:0.8rem;display:flex;align-items:center;gap:1rem}
+.zoom-controls{display:flex;gap:0.25rem}
+.zoom-controls button{background:rgba(255,255,255,0.1);border:none;color:white;cursor:pointer;padding:0.375rem 0.625rem;border-radius:4px;font-size:0.75rem}
+.zoom-controls button:hover{background:rgba(255,255,255,0.2)}
+
+/* Status */
+.status{font-size:0.8rem;color:var(--text3);padding:0.5rem 0}
+
+/* Toast */
+.toast{position:fixed;bottom:2rem;right:2rem;padding:0.75rem 1.25rem;border-radius:var(--radius-xs);font-size:0.85rem;font-weight:500;transform:translateY(100px);opacity:0;transition:all 0.3s;z-index:999}
+.toast.show{transform:translateY(0);opacity:1}
+.toast.success{background:var(--success);color:white}
+.toast.error{background:var(--error);color:white}
+
+@media(max-width:768px){.file-grid{grid-template-columns:repeat(auto-fill,minmax(120px,1fr))}}
+</style>
+</head>
+<body>
+<div class="bg-grid"></div>
+<nav class="navbar">
+<div class="nav-inner">
+  <a href="/" class="logo"><div class="logo-mark"><i data-lucide="scan-text"></i></div><span class="logo-text">DocAI</span></a>
+  <div class="nav-links">
+    <a href="/"><i data-lucide="layout-dashboard"></i>Dashboard</a>
+    <a href="/test"><i data-lucide="flask-conical"></i>Test Model</a>
+    <a href="/train"><i data-lucide="brain"></i>Training</a>
+    <a href="/image-tests" class="active"><i data-lucide="images"></i>Image Tests</a>
+    <a href="/datasets"><i data-lucide="database"></i>Datasets</a>
+  </div>
+  <div class="nav-right">
+    <div class="user-chip"><div class="user-avatar"><i data-lucide="user"></i></div><span class="user-name" id="userDisplay">admin</span></div>
+    <button class="btn-logout" onclick="logout()"><i data-lucide="log-out"></i></button>
+    <button class="nav-toggle" onclick="document.getElementById('navMobile').classList.toggle('open')"><i data-lucide="menu"></i></button>
+  </div>
+</div>
+<div class="nav-mobile" id="navMobile">
+  <a href="/"><i data-lucide="layout-dashboard"></i>Dashboard</a>
+  <a href="/test"><i data-lucide="flask-conical"></i>Test Model</a>
+  <a href="/train"><i data-lucide="brain"></i>Training</a>
+  <a href="/image-tests" class="active"><i data-lucide="images"></i>Image Tests</a>
+  <a href="/datasets"><i data-lucide="database"></i>Datasets</a>
+  <div style="border-top:1px solid var(--border);margin:0.5rem 0"></div>
+  <a href="#" onclick="logout()"><i data-lucide="log-out"></i>Logout</a>
+</div>
+</nav>
+
+<main class="container">
+<div class="page-header">
+  <h1>Image Test Workspace</h1>
+  <p>Browse input/output dataset, preview images, upload source images.</p>
+</div>
+
+<div class="layout">
+  <!-- Sidebar -->
+  <aside class="sidebar">
+    <h3><i data-lucide="folder-tree" style="width:14px;height:14px;display:inline;vertical-align:middle"></i> Test Folders</h3>
+    <div id="testList">
+      <div style="color:var(--text3);padding:1rem;text-align:center"><div class="spinner" style="margin:0 auto;width:20px;height:20px"></div></div>
+    </div>
+  </aside>
+
+  <!-- Content -->
+  <div class="content">
+    <div class="breadcrumb" id="breadcrumb"></div>
+    <div class="toolbar">
+      <select id="destination">
+        <option value="input">Upload ke Input</option>
+        <option value="output">Upload ke Output</option>
+      </select>
+      <input type="file" id="uploadInput" accept="image/*" style="display:none">
+      <button class="btn btn-primary" onclick="document.getElementById('uploadInput').click()"><i data-lucide="upload"></i>Upload Image</button>
+      <button class="btn btn-secondary" onclick="refreshAll()"><i data-lucide="refresh-cw"></i>Refresh</button>
+      <span class="file-count" id="fileCount"></span>
+    </div>
+    <div class="status" id="status"></div>
+    <div id="fileContainer">
+      <div class="empty-state"><i data-lucide="folder-open"></i><span>Pilih test folder dari sidebar</span></div>
+    </div>
+  </div>
+</div>
+</main>
+
+<!-- Lightbox -->
+<div class="lightbox" id="lightbox">
+  <button class="lightbox-close" onclick="closeLightbox()"><i data-lucide="x"></i></button>
+  <button class="lightbox-nav prev" onclick="navLightbox(-1)"><i data-lucide="chevron-left"></i></button>
+  <button class="lightbox-nav next" onclick="navLightbox(1)"><i data-lucide="chevron-right"></i></button>
+  <img class="lightbox-img" id="lightboxImg" src="">
+  <div class="lightbox-info">
+    <span id="lightboxCaption"></span>
+    <span id="lightboxCounter"></span>
+    <div class="zoom-controls">
+      <button onclick="zoomLB(-1)">−</button>
+      <button onclick="zoomLB(0)" id="zoomLevel">100%</button>
+      <button onclick="zoomLB(1)">+</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+<div style="text-align:center;padding:2rem 0;color:var(--text3);font-size:0.8rem">DocAI v1.0 - Image Tests</div>
+
+<script>
+const token=localStorage.getItem('docai_token');
+const headers=token?{'Authorization':'Bearer '+token}:{};
+let selectedTest='',selectedPath='';let lightboxImages=[],lightboxIdx=0,lightboxZoom=1;
+
+document.getElementById('userDisplay').textContent=localStorage.getItem('docai_user')||'admin';
+function logout(){localStorage.removeItem('docai_token');localStorage.removeItem('docai_user');fetch('/api/auth/logout');window.location.href='/login';}
+function showToast(msg,type='success'){const t=document.getElementById('toast');t.textContent=msg;t.className='toast '+type+' show';setTimeout(()=>t.classList.remove('show'),3000);}
+function esc(s){const d=document.createElement('div');d.textContent=s;return d.innerHTML;}
+function bytes(n){if(n==null)return'';return n<1024?n+' B':n<1048576?(n/1024).toFixed(1)+' KB':(n/1048576).toFixed(1)+' MB';}
+
+async function api(url,opts={}){
+  const r=await fetch(url,{...opts,headers:{...headers,...(opts.headers||{})}});
+  if(r.status===401){window.location='/login';throw Error('Unauthorized');}
+  const d=await r.json().catch(()=>({}));
+  if(!r.ok)throw Error(d.detail||d.error||'Request failed');
+  return d;
+}
+
+// Load test folders
+async function refreshAll(){
+  try{
+    const d=await api('/api/image-tests');
+    const list=document.getElementById('testList');
+    if(!d.tests.length){list.innerHTML='<div style="color:var(--text3);padding:1rem;text-align:center">Tidak ada test folder</div>';return;}
+    list.innerHTML=d.tests.map(t=>`<button class="folder-btn ${t.name===selectedTest?'active':''}" onclick="selectTest('${esc(t.name)}')"><i data-lucide="folder"></i><span>${esc(t.name)}</span><span class="count">${t.image_count}</span></button>`).join('');
+    lucide.createIcons();
+    if(!selectedTest&&d.tests.length)selectTest(d.tests[0].name);
+    else if(selectedTest)loadFiles();
+  }catch(e){document.getElementById('status').textContent='Gagal memuat: '+e.message;}
+}
+
+function selectTest(name){selectedTest=name;selectedPath='input';refreshAll();}
+
+async function loadFiles(){
+  if(!selectedTest)return;
+  const container=document.getElementById('fileContainer');
+  container.innerHTML='<div class="empty-state"><div class="spinner" style="width:24px;height:24px"></div><span>Memuat...</span></div>';
+  try{
+    const d=await api('/api/image-tests/files?test='+encodeURIComponent(selectedTest)+'&path='+encodeURIComponent(selectedPath));
+    // Breadcrumb
+    const bc=document.getElementById('breadcrumb');
+    let html=`<button onclick="openFolder('input')">${esc(selectedTest)}</button>`;
+    if(selectedPath&&selectedPath!=='input'){
+      const parts=selectedPath.split('/');
+      let acc='';
+      for(const p of parts){
+        acc+=(acc?'/':'')+p;
+        const pp=acc;
+        html+=`<span>/</span><button onclick="openFolder('${esc(pp)}')">${esc(p)}</button>`;
+      }
+    }
+    bc.innerHTML=html;
+
+    document.getElementById('fileCount').textContent=d.items.length+' items';
+
+    if(!d.items.length){container.innerHTML='<div class="empty-state"><i data-lucide="folder-open"></i><span>Folder kosong</span></div>';lucide.createIcons();return;}
+
+    // Build grid
+    let grid='<div class="file-grid">';
+    const images=[];
+    for(const item of d.items){
+      if(item.type==='folder'){
+        grid+=`<div class="file-card folder-card" onclick="openFolder('${esc(item.path)}')"><i data-lucide="folder"></i><div class="name">${esc(item.name)}</div></div>`;
+      }else if(item.is_image){
+        const url='/api/image-tests/preview?test='+encodeURIComponent(selectedTest)+'&path='+encodeURIComponent(item.path);
+        images.push({url,name:item.name,path:item.path});
+        grid+=`<div class="file-card" onclick="openImageLB(${images.length-1})"><img loading="lazy" src="${url}" alt="${esc(item.name)}"><div class="info"><span class="name">${esc(item.name)}</span><span>${bytes(item.size)}</span></div></div>`;
+      }
+    }
+    grid+='</div>';
+    container.innerHTML=grid;
+    lightboxImages=images;
+    lucide.createIcons();
+  }catch(e){container.innerHTML='<div class="empty-state"><i data-lucide="alert-triangle"></i><span>Gagal memuat: '+e.message+'</span></div>';lucide.createIcons();}
+}
+
+function openFolder(path){selectedPath=path;loadFiles();}
+
+// Upload
+document.getElementById('uploadInput').addEventListener('change',async function(e){
+  const file=e.target.files[0];if(!file||!selectedTest)return;
+  const body=new FormData();body.append('test',selectedTest);body.append('destination',document.getElementById('destination').value);body.append('file',file);
+  document.getElementById('status').textContent='Uploading...';
+  try{const d=await api('/api/image-tests/upload',{method:'POST',body});showToast('Uploaded: '+d.path);selectedPath=document.getElementById('destination').value;loadFiles();}
+  catch(e){showToast('Upload gagal: '+e.message,'error');}
+  document.getElementById('status').textContent='';this.value='';
+});
+
+// Lightbox
+function openImageLB(idx){lightboxIdx=idx;lightboxZoom=1;showLBImg();document.getElementById('lightbox').classList.add('open');document.body.style.overflow='hidden';}
+function closeLightbox(){document.getElementById('lightbox').classList.remove('open');document.body.style.overflow='';lightboxZoom=1;}
+function showLBImg(){const img=lightboxImages[lightboxIdx];const el=document.getElementById('lightboxImg');el.src=img.url;el.style.transform='scale(1)';lightboxZoom=1;document.getElementById('zoomLevel').textContent='100%';document.getElementById('lightboxCaption').textContent=img.name;document.getElementById('lightboxCounter').textContent=lightboxImages.length>1?(lightboxIdx+1)+' / '+lightboxImages.length:'';}
+function navLightbox(dir){lightboxIdx=(lightboxIdx+dir+lightboxImages.length)%lightboxImages.length;showLBImg();}
+function zoomLB(dir){if(dir===0){lightboxZoom=lightboxZoom===1?2:1;}else if(dir>0){lightboxZoom=Math.min(lightboxZoom+0.5,5);}else{lightboxZoom=Math.max(lightboxZoom-0.5,0.5);}document.getElementById('lightboxImg').style.transform='scale('+lightboxZoom+')';document.getElementById('zoomLevel').textContent=Math.round(lightboxZoom*100)+'%';}
+
+document.addEventListener('keydown',e=>{
+  if(document.getElementById('lightbox').classList.contains('open')){
+    if(e.key==='Escape')closeLightbox();
+    if(e.key==='ArrowLeft')navLightbox(-1);
+    if(e.key==='ArrowRight')navLightbox(1);
+    if(e.key==='+'||e.key==='=')zoomLB(1);
+    if(e.key==='-')zoomLB(-1);
+    if(e.key==='0')zoomLB(0);
+  }
+});
+
+// Init
+refreshAll();
+lucide.createIcons();
+</script>
+</body>
+</html>

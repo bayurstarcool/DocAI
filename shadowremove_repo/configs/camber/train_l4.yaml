@@ -1,0 +1,27 @@
+# CamberCloud training preset for NVIDIA L4 GPU.
+# Usage from repo root:
+#   python train.py --data data/clean_docs --epochs 80 --batch 4 --size 1024 --workers 4 --amp --out runs/camber_l4
+# For paired dataset:
+#   python train.py --paired-shadow data/sd7k/shadow --paired-clean data/sd7k/clean --paired-mask data/sd7k/mask --epochs 80 --batch 4 --size 1024 --workers 4 --amp --out runs/camber_l4_paired
+
+provider: cambercloud
+gpu:
+  type: nvidia_l4
+  min_vram_gb: 24
+python:
+  version: '3.11'
+training:
+  default_clean_data: data/clean_docs
+  default_out: runs/camber_l4
+  epochs: 80
+  batch: 2
+  size: 768
+  workers: 0
+  base: 32
+  amp: true
+notes:
+  - CamberCloud public docs currently advertise NVIDIA L4 on-demand GPUs.
+  - Use CUDA PyTorch wheels, not ROCm wheels, on CamberCloud L4.
+  - Camber GPU xsmall has limited shared memory; use workers=0.
+  - L4 22GB can OOM at size=1024/base=48; use size=768, batch=1, base=32 for first run.
+  - Keep datasets in Camber Stash or synced storage; do not commit datasets.

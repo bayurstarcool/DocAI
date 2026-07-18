@@ -1,0 +1,620 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DocAI - Training</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+<script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+<style>
+:root{--primary:#6366f1;--bg:#09090b;--bg2:#0f0f12;--bg3:#18181b;--surface:#27272a;--border:#27272a;--text:#fafafa;--text2:#a1a1aa;--text3:#71717a;--accent:#06b6d4;--accent2:#22d3ee;--success:#10b981;--warning:#f59e0b;--error:#ef4444;--gradient-1:linear-gradient(135deg,#6366f1,#06b6d4);--radius:16px;--radius-sm:12px;--radius-xs:8px}
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'Inter',-apple-system,sans-serif;background:var(--bg);color:var(--text);min-height:100vh}
+.bg-grid{position:fixed;inset:0;z-index:0;pointer-events:none;background-image:radial-gradient(circle at 1px 1px,rgba(99,102,241,0.06) 1px,transparent 0);background-size:40px 40px}
+.navbar{position:sticky;top:0;z-index:100;background:rgba(9,9,11,0.75);backdrop-filter:blur(16px);border-bottom:1px solid var(--border)}
+.nav-inner{max-width:1280px;margin:0 auto;padding:0 1.5rem;height:64px;display:flex;align-items:center;justify-content:space-between}
+.logo{display:flex;align-items:center;gap:0.625rem;text-decoration:none}
+.logo-mark{width:36px;height:36px;background:var(--gradient-1);border-radius:10px;display:grid;place-items:center;color:white}
+.logo-mark i{width:20px;height:20px}
+.logo-text{font-size:1.125rem;font-weight:700;color:var(--text)}
+.nav-links{display:flex;gap:0.25rem}
+.nav-links a{color:var(--text2);text-decoration:none;font-weight:500;font-size:0.875rem;padding:0.5rem 0.875rem;border-radius:var(--radius-xs);transition:all 0.15s;display:flex;align-items:center;gap:0.5rem}
+.nav-links a i{width:16px;height:16px}
+.nav-links a:hover{color:var(--text);background:var(--bg3)}
+.nav-links a.active{color:var(--accent2);background:rgba(6,182,212,0.1)}
+.nav-right{display:flex;align-items:center;gap:0.75rem}
+.user-chip{display:flex;align-items:center;gap:0.5rem;padding:0.375rem 0.75rem 0.375rem 0.375rem;background:var(--bg3);border:1px solid var(--border);border-radius:999px}
+.user-avatar{width:28px;height:28px;background:linear-gradient(135deg,#8b5cf6,#ec4899);border-radius:50%;display:grid;place-items:center;color:white}
+.user-avatar i{width:14px;height:14px}
+.user-chip span{font-size:0.8rem;font-weight:500}
+.btn-logout{display:flex;align-items:center;padding:0.5rem;background:transparent;border:1px solid var(--border);border-radius:var(--radius-xs);color:var(--text2);cursor:pointer;transition:all 0.15s}
+.btn-logout i{width:16px;height:16px}
+.btn-logout:hover{border-color:var(--error);color:var(--error)}
+.nav-toggle{display:none;background:none;border:1px solid var(--border);color:var(--text2);cursor:pointer;padding:0.5rem;border-radius:var(--radius-xs)}
+.nav-mobile{display:none;position:absolute;top:64px;left:0;right:0;background:var(--bg2);border-bottom:1px solid var(--border);padding:0.75rem;z-index:200}
+.nav-mobile.open{display:block}
+.nav-mobile a{display:flex;align-items:center;gap:0.75rem;padding:0.75rem 1rem;color:var(--text2);text-decoration:none;border-radius:var(--radius-xs);font-weight:500;font-size:0.9rem}
+.nav-mobile a i{width:18px;height:18px}
+.nav-mobile a:hover{background:var(--bg3);color:var(--text)}
+.nav-mobile a.active{color:var(--accent2);background:rgba(6,182,212,0.1)}
+@media(max-width:768px){.nav-links{display:none!important}.nav-toggle{display:flex}.user-chip .user-name{display:none}}
+.container{max-width:1280px;margin:0 auto;padding:2rem 1.5rem;position:relative;z-index:1}
+.page-header{margin-bottom:2rem}
+.page-header h1{font-size:1.5rem;font-weight:700}
+.page-header p{color:var(--text2);margin-top:0.25rem;font-size:0.9rem}
+.card{background:var(--bg3);border:1px solid var(--border);border-radius:var(--radius);padding:1.5rem;margin-bottom:1.5rem}
+.card h2{font-size:1.1rem;font-weight:600;margin-bottom:1rem;display:flex;align-items:center;gap:0.5rem}
+.card h2 i{width:20px;height:20px;color:var(--accent2)}
+.grid-2{display:grid;grid-template-columns:1fr 1fr;gap:1.5rem}
+.grid-3{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:1rem}
+@media(max-width:900px){.grid-2{grid-template-columns:1fr}}
+.label{font-size:0.75rem;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:0.5rem}
+.stat-card{background:var(--bg);border:1px solid var(--border);border-radius:var(--radius-xs);padding:1rem}
+.stat-card .k{font-size:0.7rem;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:0.375rem}
+.stat-card .v{font-size:1.25rem;font-weight:700}
+.stat-card .v.green{color:var(--success)}
+.stat-card .v.cyan{color:var(--accent2)}
+.stat-card .v.yellow{color:var(--warning)}
+.chart-box{background:var(--bg);border:1px solid var(--border);border-radius:var(--radius-sm);padding:1rem;height:320px;position:relative}
+select,input[type=number],input[type=text]{padding:0.5rem 0.75rem;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius-xs);color:var(--text);font-family:inherit;font-size:0.85rem;width:100%;transition:border-color 0.15s}
+select:focus,input:focus{outline:none;border-color:var(--accent)}
+select{cursor:pointer;appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2371717a' stroke-width='2'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3E/svg%3E");background-repeat:no-repeat;background-position:right 0.75rem center;padding-right:2rem}
+.form-row{display:grid;grid-template-columns:1fr 1fr;gap:0.75rem;margin-bottom:0.75rem}
+.form-group{margin-bottom:0.75rem}
+.form-group label{display:block;font-size:0.8rem;font-weight:500;color:var(--text2);margin-bottom:0.375rem}
+.btn{padding:0.5rem 1rem;border-radius:var(--radius-xs);font-weight:600;font-size:0.8rem;cursor:pointer;border:none;font-family:inherit;transition:all 0.2s;display:inline-flex;align-items:center;gap:0.5rem}
+.btn i{width:14px;height:14px}
+.btn-primary{background:var(--gradient-1);color:white}
+.btn-primary:hover{transform:translateY(-1px);box-shadow:0 4px 15px rgba(99,102,241,0.3)}
+.btn-primary:disabled{opacity:0.5;cursor:not-allowed;transform:none;box-shadow:none}
+.btn-danger{background:var(--error);color:white}
+.btn-danger:hover{opacity:0.9}
+.btn-secondary{background:var(--bg);border:1px solid var(--border);color:var(--text)}
+.btn-secondary:hover{border-color:var(--text3)}
+.btn-sm{padding:0.375rem 0.75rem;font-size:0.75rem}
+.spinner{border:2px solid var(--border);border-top-color:var(--accent);border-radius:50%;width:14px;height:14px;animation:spin 0.8s linear infinite;display:inline-block;vertical-align:middle}
+@keyframes spin{to{transform:rotate(360deg)}}
+.log-box{background:var(--bg);border:1px solid var(--border);border-radius:var(--radius-xs);padding:1rem;font-family:'Fira Code',monospace;font-size:0.75rem;color:var(--accent2);max-height:350px;overflow-y:auto;white-space:pre-wrap;word-break:break-all;line-height:1.6}
+.log-box::-webkit-scrollbar{width:6px}
+.log-box::-webkit-scrollbar-track{background:var(--bg)}
+.log-box::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px}
+.ds-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:0.75rem}
+.ds-card{background:var(--bg);border:2px solid var(--border);border-radius:var(--radius-sm);padding:1rem;cursor:pointer;transition:all 0.2s;position:relative}
+.ds-card:hover{border-color:var(--accent);background:rgba(6,182,212,0.03)}
+.ds-card.selected{border-color:var(--accent2);background:rgba(6,182,212,0.06)}
+.ds-card .ds-icon{width:36px;height:36px;border-radius:8px;display:grid;place-items:center;margin-bottom:0.75rem;font-size:1.1rem}
+.ds-card .ds-icon.paired{background:rgba(99,102,241,0.15);color:var(--primary)}
+.ds-card .ds-icon.clean{background:rgba(16,185,129,0.15);color:var(--success)}
+.ds-card .ds-name{font-size:0.9rem;font-weight:600;margin-bottom:0.25rem}
+.ds-card .ds-meta{font-size:0.75rem;color:var(--text2)}
+.ds-card .ds-badge{position:absolute;top:0.75rem;right:0.75rem;font-size:0.65rem;font-weight:700;padding:0.2rem 0.5rem;border-radius:999px;text-transform:uppercase;letter-spacing:0.05em}
+.ds-badge.ready{background:rgba(16,185,129,0.15);color:var(--success)}
+.ds-badge.partial{background:rgba(245,158,11,0.15);color:var(--warning)}
+.ds-badge.unavail{background:rgba(239,68,68,0.15);color:var(--error)}
+.ds-check{position:absolute;top:0.75rem;right:0.75rem;width:20px;height:20px;border-radius:50%;border:2px solid var(--border);display:grid;place-items:center;transition:all 0.15s}
+.ds-card.selected .ds-check{background:var(--accent2);border-color:var(--accent2)}
+.ds-card.selected .ds-check::after{content:'✓';font-size:11px;color:var(--bg);font-weight:700}
+.sample-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:0.5rem;margin-top:1rem}
+.sample-img{background:var(--bg);border:1px solid var(--border);border-radius:var(--radius-xs);overflow:hidden;aspect-ratio:1}
+.sample-img img{width:100%;height:100%;object-fit:cover}
+.footer{text-align:center;color:var(--text3);font-size:0.8rem;padding:2rem 0 1rem}
+.toast{position:fixed;bottom:1.5rem;right:1.5rem;padding:0.75rem 1.25rem;border-radius:var(--radius-xs);font-size:0.85rem;font-weight:500;z-index:300;transform:translateY(100px);opacity:0;transition:all 0.3s}
+.toast.show{transform:translateY(0);opacity:1}
+.toast.success{background:var(--success);color:white}
+.toast.error{background:var(--error);color:white}
+.tab-bar{display:flex;gap:0.25rem;margin-bottom:1rem;border-bottom:1px solid var(--border);padding-bottom:0.5rem}
+.tab-btn{padding:0.5rem 1rem;background:transparent;border:none;color:var(--text2);font-size:0.85rem;font-weight:500;cursor:pointer;border-radius:var(--radius-xs) var(--radius-xs) 0 0;font-family:inherit;transition:all 0.15s}
+.tab-btn:hover{color:var(--text);background:var(--bg)}
+.tab-btn.active{color:var(--accent2);background:rgba(6,182,212,0.1);border-bottom:2px solid var(--accent2)}
+.tab-content{display:none}
+.tab-content.active{display:block}
+.progress-bar{height:4px;background:var(--border);border-radius:2px;overflow:hidden;margin-top:0.5rem}
+.progress-fill{height:100%;background:var(--gradient-1);border-radius:2px;transition:width 0.3s;width:0}
+.running-bar{display:flex;align-items:center;gap:0.5rem;padding:0.75rem 1rem;background:rgba(6,182,212,0.08);border:1px solid var(--accent);border-radius:var(--radius-xs);margin-bottom:1rem}
+.running-dot{width:8px;height:8px;border-radius:50%;background:var(--accent2);animation:pulse 1.5s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:0.3}}
+</style>
+</head>
+<body>
+<div class="bg-grid"></div>
+<nav class="navbar">
+<div class="nav-inner">
+  <a href="/" class="logo"><div class="logo-mark"><i data-lucide="scan-eye"></i></div><span class="logo-text">DocAI</span></a>
+  <div class="nav-links">
+    <a href="/"><i data-lucide="layout-dashboard"></i>Dashboard</a>
+    <a href="/test"><i data-lucide="flask-conical"></i>Test Model</a>
+    <a href="/train" class="active"><i data-lucide="brain"></i>Training</a>
+    <a href="/image-tests"><i data-lucide="images"></i>Image Tests</a>
+    <a href="/datasets"><i data-lucide="database"></i>Datasets</a>
+  </div>
+  <div class="nav-right">
+    <div class="user-chip"><div class="user-avatar"><i data-lucide="user"></i></div><span class="user-name" id="userDisplay">admin</span></div>
+    <button class="btn-logout" onclick="logout()"><i data-lucide="log-out"></i></button>
+    <button class="nav-toggle" onclick="document.getElementById('navMobile').classList.toggle('open')"><i data-lucide="menu"></i></button>
+  </div>
+</div>
+<div class="nav-mobile" id="navMobile">
+  <a href="/"><i data-lucide="layout-dashboard"></i>Dashboard</a>
+  <a href="/test"><i data-lucide="flask-conical"></i>Test Model</a>
+  <a href="/train" class="active"><i data-lucide="brain"></i>Training</a>
+  <a href="/image-tests"><i data-lucide="images"></i>Image Tests</a>
+  <a href="/datasets"><i data-lucide="database"></i>Datasets</a>
+</div>
+</nav>
+
+<main class="container">
+<div class="page-header">
+  <h1>Training Manager</h1>
+  <p>Pilih dataset, konfigurasi hyperparameter, jalankan training, dan monitor progress secara real-time.</p>
+</div>
+
+<!-- Status Cards -->
+<div class="grid-3" id="statusCards">
+  <div class="stat-card"><div class="k">Status</div><div class="v" id="stStatus">Loading...</div></div>
+  <div class="stat-card"><div class="k">Epochs</div><div class="v cyan" id="stEpochs">-</div></div>
+  <div class="stat-card"><div class="k">Best Val Loss</div><div class="v green" id="stBestLoss">-</div></div>
+  <div class="stat-card"><div class="k">Train Pairs</div><div class="v" id="stPairs">-</div></div>
+</div>
+
+<!-- Training Progress (hidden when not running) -->
+<div class="card" id="runningCard" style="display:none">
+  <div class="running-bar">
+    <div class="running-dot"></div>
+    <span style="font-weight:600;font-size:0.9rem">Training Berlangsung</span>
+    <span style="margin-left:auto;font-size:0.8rem;color:var(--text2)" id="runningInfo"></span>
+    <button class="btn btn-danger btn-sm" onclick="stopTraining()"><i data-lucide="square"></i>Stop</button>
+  </div>
+  <div class="progress-bar"><div class="progress-fill" id="trainProgress"></div></div>
+</div>
+
+<!-- Tabs -->
+<div class="card">
+  <div class="tab-bar">
+    <button class="tab-btn active" onclick="switchTab('datasets')"><i data-lucide="database"></i> Pilih Dataset</button>
+    <button class="tab-btn" onclick="switchTab('config')"><i data-lucide="settings"></i> Konfigurasi</button>
+    <button class="tab-btn" onclick="switchTab('logs')"><i data-lucide="terminal"></i> Logs</button>
+    <button class="tab-btn" onclick="switchTab('history')"><i data-lucide="trending-down"></i> History</button>
+    <button class="tab-btn" onclick="switchTab('samples')"><i data-lucide="image"></i> Samples</button>
+  </div>
+
+  <!-- Tab: Dataset Selection -->
+  <div class="tab-content active" id="tab-datasets">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem">
+      <div><span class="label" style="margin:0">Dataset Tersedia</span>
+        <p style="font-size:0.8rem;color:var(--text2);margin-top:0.125rem">Klik untuk memilih dataset training</p>
+      </div>
+      <button class="btn btn-secondary btn-sm" onclick="loadDatasets()"><i data-lucide="refresh-cw"></i>Refresh</button>
+    </div>
+    <div class="ds-grid" id="dsGrid"><div style="color:var(--text2);padding:1rem">Loading datasets...</div></div>
+
+    <div id="datasetExplorer" style="display:none;margin-top:1.25rem;padding-top:1rem;border-top:1px solid var(--border)">
+      <div style="display:flex;align-items:center;gap:0.5rem;flex-wrap:wrap;margin-bottom:0.75rem">
+        <div class="label" style="margin:0"><i data-lucide="folder-open"></i> Dataset Explorer</div>
+        <button class="btn btn-secondary btn-sm" onclick="explorerUp()"><i data-lucide="arrow-up"></i> Naik</button>
+        <button class="btn btn-secondary btn-sm" onclick="closeExplorer()"><i data-lucide="x"></i> Tutup</button>
+        <span id="explorerCount" style="margin-left:auto;font-size:0.75rem;color:var(--text3)"></span>
+      </div>
+      <div id="explorerBreadcrumb" style="font-family:'Fira Code',monospace;font-size:0.75rem;color:var(--accent2);word-break:break-all;margin-bottom:0.75rem"></div>
+      <div id="explorerGrid" class="ds-grid"></div>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-top:0.75rem">
+        <button class="btn btn-secondary btn-sm" id="explorerPrev" onclick="explorerPage(-1)"><i data-lucide="chevron-left"></i> Sebelumnya</button>
+        <span id="explorerPage" style="font-size:0.75rem;color:var(--text2)"></span>
+        <button class="btn btn-secondary btn-sm" id="explorerNext" onclick="explorerPage(1)">Berikutnya <i data-lucide="chevron-right"></i></button>
+      </div>
+    </div>
+
+    <div style="margin-top:1.25rem;padding-top:1rem;border-top:1px solid var(--border)">
+      <div class="label">Custom Dataset Path</div>
+      <div style="display:flex;gap:0.5rem;margin-top:0.5rem">
+        <input type="text" id="customPath" placeholder="e.g. datasets/Document_Enhancement/train" style="flex:1">
+        <button class="btn btn-secondary btn-sm" onclick="addCustomDataset()"><i data-lucide="plus"></i>Add</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Tab: Config -->
+  <div class="tab-content" id="tab-config">
+    <div class="grid-2">
+      <div>
+        <div class="label">Model Settings</div>
+        <div class="form-row">
+          <div class="form-group"><label>Base Channels</label><input type="number" id="cfgChannels" value="32" min="8" max="128"></div>
+          <div class="form-group"><label>Image Size</label><input type="number" id="cfgSize" value="512" min="64" max="1024" step="64"></div>
+        </div>
+      </div>
+      <div>
+        <div class="label">Training Settings</div>
+        <div class="form-row">
+          <div class="form-group"><label>Epochs</label><input type="number" id="cfgEpochs" value="100" min="1" max="10000"></div>
+          <div class="form-group"><label>Batch Size</label><input type="number" id="cfgBatch" value="8" min="1" max="64"></div>
+        </div>
+        <div class="form-row">
+          <div class="form-group"><label>Learning Rate</label><input type="text" id="cfgLR" value="0.0002"></div>
+          <div class="form-group"><label>Workers</label><input type="number" id="cfgWorkers" value="4" min="0" max="16"></div>
+        </div>
+      </div>
+    </div>
+    <div style="margin-top:0.5rem">
+      <div class="label">Advanced</div>
+      <div class="form-row">
+        <div class="form-group"><label>Device</label><select id="cfgDevice"><option value="auto">Auto (CUDA if available)</option><option value="cuda">CUDA (GPU)</option><option value="cpu">CPU</option></select></div>
+        <div class="form-group"><label>Output Dir</label><input type="text" id="cfgOutput" value="checkpoints/document_restorer"></div>
+      </div>
+      <div class="form-row">
+        <div class="form-group"><label>Max Train Samples (0=all)</label><input type="number" id="cfgMaxTrain" value="0" min="0"></div>
+        <div class="form-group"><label>Max Val Samples (0=all)</label><input type="number" id="cfgMaxVal" value="0" min="0"></div>
+      </div>
+    </div>
+
+    <div style="margin-top:1rem;padding:1rem;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius-xs)">
+      <div class="label">Generated Command</div>
+      <div style="font-family:'Fira Code',monospace;font-size:0.75rem;color:var(--accent2);white-space:pre-wrap;word-break:break-all;margin-top:0.5rem" id="cmdPreview">python train.py ...</div>
+    </div>
+  </div>
+
+  <!-- Tab: Logs -->
+  <div class="tab-content" id="tab-logs">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.75rem">
+      <div class="label" style="margin:0">Training Logs</div>
+      <div style="display:flex;gap:0.5rem">
+        <button class="btn btn-secondary btn-sm" onclick="refreshLog()"><i data-lucide="refresh-cw"></i>Refresh</button>
+        <button class="btn btn-secondary btn-sm" onclick="clearLog()"><i data-lucide="trash-2"></i>Clear</button>
+      </div>
+    </div>
+    <div class="log-box" id="logBox">Belum ada log training...</div>
+  </div>
+
+  <!-- Tab: History -->
+  <div class="tab-content" id="tab-history">
+    <div class="grid-2">
+      <div>
+        <div class="label">Loss Chart</div>
+        <div class="chart-box"><canvas id="lossChart"></canvas></div>
+      </div>
+      <div>
+        <div class="label">Training Info</div>
+        <div id="trainInfo" style="padding:1rem;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius-xs);font-size:0.85rem;color:var(--text2)">
+          Belum ada data training.
+        </div>
+        <div style="margin-top:1rem">
+          <div class="label">Quick Commands</div>
+          <div style="font-family:'Fira Code',monospace;font-size:0.75rem;color:var(--accent2);background:var(--bg);border:1px solid var(--border);border-radius:var(--radius-xs);padding:0.75rem;white-space:pre-wrap;word-break:break-all" id="cmdBlock">python train.py --paired-data data/datasets/paired/ShadowDocument7K --epochs 100</div>
+          <button class="btn btn-secondary btn-sm" style="margin-top:0.5rem" onclick="copyCmd()"><i data-lucide="copy"></i>Copy</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Tab: Samples -->
+  <div class="tab-content" id="tab-samples">
+    <div class="label">Sample Outputs dari Training Terakhir</div>
+    <p style="font-size:0.8rem;color:var(--text2);margin-bottom:1rem">Perbandingan: Input → Target → Predicted</p>
+    <div id="samplesGrid" class="sample-grid"><div style="color:var(--text2);padding:1rem">Loading samples...</div></div>
+  </div>
+</div>
+
+<!-- Action Bar -->
+<div style="display:flex;gap:0.75rem;align-items:center;flex-wrap:wrap">
+  <button class="btn btn-primary" id="startBtn" onclick="startTraining()">
+    <i data-lucide="play"></i>Mulai Training
+  </button>
+  <button class="btn btn-secondary" onclick="refreshAll()"><i data-lucide="refresh-cw"></i>Refresh Semua</button>
+  <span style="margin-left:auto;font-size:0.8rem;color:var(--text3)" id="lastUpdate"></span>
+</div>
+</main>
+
+<div class="toast" id="toast"></div>
+<div class="footer">DocAI v1.0 — Training Manager</div>
+
+<script>
+const token=localStorage.getItem('docai_token');
+const hdr=token?{'Authorization':'Bearer '+token}:{};
+let datasets=[], selectedClean=[], selectedPaired=[], lossChart=null, logPoller=null;
+let explorerDataset='', explorerPath='', explorerOffset=0, explorerTotal=0, explorerLimit=60;
+
+document.getElementById('userDisplay').textContent=localStorage.getItem('docai_user')||'admin';
+function logout(){localStorage.removeItem('docai_token');localStorage.removeItem('docai_user');fetch('/api/auth/logout');location.href='/login';}
+function showToast(m,t='success'){const e=document.getElementById('toast');e.textContent=m;e.className='toast '+t+' show';setTimeout(()=>e.classList.remove('show'),3000);}
+
+// Tab switching
+function switchTab(name){
+  document.querySelectorAll('.tab-btn').forEach(b=>b.classList.remove('active'));
+  document.querySelectorAll('.tab-content').forEach(c=>c.classList.remove('active'));
+  document.getElementById('tab-'+name).classList.add('active');
+  event.currentTarget.classList.add('active');
+}
+
+// === DATASETS ===
+async function loadDatasets(){
+  try{
+    const r=await fetch('/api/datasets',{headers:hdr});
+    const d=await r.json();
+    datasets=d.datasets||[];
+    renderDatasets();
+  }catch(e){showToast('Gagal load datasets: '+e.message,'error');}
+}
+
+function renderDatasets(){
+  const g=document.getElementById('dsGrid');
+  if(!datasets.length){g.innerHTML='<div style="color:var(--text3);padding:1rem">Tidak ada dataset ditemukan.</div>';return;}
+  g.innerHTML=datasets.map(ds=>{
+    const isClean=ds.kind==='clean';
+    const isPaired=ds.kind==='paired';
+    const sel=isClean?selectedClean.includes(ds.path):selectedPaired.includes(ds.path);
+    const ready=ds.ready||(ds.image_count>0)||(ds.pair_count>0);
+    const badgeClass=ready?'ready':'unavail';
+    const badgeText=ready?(isPaired?(ds.train_pairs||ds.pair_count)+' pairs':(ds.image_count||0)+' imgs'):'N/A';
+    const count=isPaired?(ds.train_pairs||ds.pair_count||0)+' train pairs'+(ds.test_count?' / '+ds.test_count+' test':''):(ds.image_count||0)+' images';
+    return `<div class="ds-card${sel?' selected':''}" onclick="toggleDS('${ds.path}','${ds.kind}')">
+      <div class="ds-check"></div>
+      <div class="ds-icon ${isClean?'clean':'paired'}">${isClean?'📄':'🔄'}</div>
+      <div class="ds-name">${ds.name}</div>
+      <div class="ds-meta">${count}</div>
+      <div class="ds-meta" style="margin-top:0.25rem;color:var(--text3)">${ds.source||''}${ds.note?' · '+ds.note:''}</div>
+      <span class="ds-badge ${badgeClass}">${badgeText}</span>
+      <button class="btn btn-secondary btn-sm" style="margin-top:0.75rem;width:100%" onclick="event.stopPropagation();openExplorer('${ds.path}')"><i data-lucide="folder-open"></i> Lihat File</button>
+    </div>`;
+  }).join('');
+  updateCmdPreview();
+}
+
+function openExplorer(dataset){
+  explorerDataset=dataset; explorerPath=''; explorerOffset=0;
+  document.getElementById('datasetExplorer').style.display='block';
+  loadExplorer();
+}
+
+function closeExplorer(){document.getElementById('datasetExplorer').style.display='none';}
+
+function explorerUp(){
+  if(!explorerPath)return;
+  const parts=explorerPath.split('/'); parts.pop(); explorerPath=parts.join('/'); explorerOffset=0; loadExplorer();
+}
+
+function explorerPage(direction){
+  const next=explorerOffset+(direction*explorerLimit);
+  if(next<0||next>=explorerTotal)return;
+  explorerOffset=next; loadExplorer();
+}
+
+function explorerImageUrl(path){
+  return `/api/datasets/explorer/image?dataset=${encodeURIComponent(explorerDataset)}&path=${encodeURIComponent(path)}`;
+}
+
+async function loadExplorer(){
+  const grid=document.getElementById('explorerGrid');
+  grid.innerHTML='<div style="color:var(--text3);padding:1rem">Membaca folder...</div>';
+  try{
+    const query=new URLSearchParams({dataset:explorerDataset,path:explorerPath,offset:explorerOffset,limit:explorerLimit});
+    const response=await fetch('/api/datasets/explorer?'+query,{headers:hdr});
+    const data=await response.json();
+    if(!response.ok)throw new Error(data.detail||'Gagal membuka dataset');
+    explorerPath=data.path; explorerTotal=data.total;
+    document.getElementById('explorerBreadcrumb').textContent=explorerDataset+(data.path?' / '+data.path:'');
+    document.getElementById('explorerCount').textContent=`${data.total} item`;
+    document.getElementById('explorerPage').textContent=`${data.offset+1}-${Math.min(data.offset+data.entries.length,data.total)} dari ${data.total}`;
+    document.getElementById('explorerPrev').disabled=data.offset===0;
+    document.getElementById('explorerNext').disabled=data.offset+data.limit>=data.total;
+    if(!data.entries.length){grid.innerHTML='<div style="color:var(--text3);padding:1rem">Folder kosong.</div>';return;}
+    grid.innerHTML=data.entries.map(item=>item.kind==='folder'
+      ? `<button class="ds-card" style="text-align:left" onclick="explorerPath='${item.path}';explorerOffset=0;loadExplorer()"><div class="ds-icon paired">📁</div><div class="ds-name">${item.name}</div><div class="ds-meta">Folder</div></button>`
+      : `<button class="ds-card" style="text-align:left" onclick="window.open(explorerImageUrl('${item.path}'),'_blank','noopener')"><img src="${explorerImageUrl(item.path)}" alt="${item.name}" loading="lazy" style="width:100%;height:100px;object-fit:cover;border-radius:6px;background:var(--bg)"><div class="ds-name" style="margin-top:0.5rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${item.name}</div><div class="ds-meta">${(item.size/1024/1024).toFixed(2)} MB</div></button>`
+    ).join('');
+    lucide.createIcons();
+  }catch(error){grid.textContent='Gagal membuka explorer: '+error.message;showToast(error.message,'error');}
+}
+
+function toggleDS(path,kind){
+  if(kind==='clean'){
+    const i=selectedClean.indexOf(path);
+    if(i>=0)selectedClean.splice(i,1);else selectedClean.push(path);
+  }else{
+    const i=selectedPaired.indexOf(path);
+    if(i>=0)selectedPaired.splice(i,1);else selectedPaired.push(path);
+  }
+  renderDatasets();
+}
+
+function addCustomDataset(){
+  const p=document.getElementById('customPath').value.trim();
+  if(!p)return;
+  // Try to figure out kind
+  const name=p.split('/').pop();
+  const ds={name,kind:'paired',path:p,ready:true,train_pairs:0,test_count:0,source:'custom',note:'Custom path'};
+  datasets.push(ds);
+  selectedPaired.push(p);
+  renderDatasets();
+  document.getElementById('customPath').value='';
+}
+
+// === CONFIG ===
+function updateCmdPreview(){
+  const cmd=buildCmd();
+  document.getElementById('cmdPreview').textContent=cmd;
+  document.getElementById('cmdBlock').textContent=cmd;
+}
+
+function buildCmd(){
+  const parts=['python train.py'];
+  if(selectedClean.length)parts.push('--clean-data '+selectedClean.join(' '));
+  if(selectedPaired.length)parts.push('--paired-data '+selectedPaired.join(' '));
+  parts.push('--epochs '+document.getElementById('cfgEpochs').value);
+  parts.push('--batch-size '+document.getElementById('cfgBatch').value);
+  parts.push('--size '+document.getElementById('cfgSize').value);
+  parts.push('--lr '+document.getElementById('cfgLR').value);
+  parts.push('--base-channels '+document.getElementById('cfgChannels').value);
+  parts.push('--workers '+document.getElementById('cfgWorkers').value);
+  parts.push('--device '+document.getElementById('cfgDevice').value);
+  parts.push('--output '+document.getElementById('cfgOutput').value);
+  const mt=parseInt(document.getElementById('cfgMaxTrain').value)||0;
+  const mv=parseInt(document.getElementById('cfgMaxVal').value)||0;
+  if(mt)parts.push('--max-train-samples '+mt);
+  if(mv)parts.push('--max-validation-samples '+mv);
+  return parts.join(' \\\n  ');
+}
+
+// Listen for config changes
+document.querySelectorAll('#tab-config input, #tab-config select').forEach(el=>{
+  el.addEventListener('change',updateCmdPreview);
+  el.addEventListener('input',updateCmdPreview);
+});
+
+// === TRAINING CONTROL ===
+async function startTraining(){
+  if(!selectedClean.length&&!selectedPaired.length){showToast('Pilih dataset terlebih dahulu!','error');return;}
+  const fd=new FormData();
+  if(selectedClean.length)fd.append('clean_data',selectedClean.join(','));
+  if(selectedPaired.length)fd.append('paired_data',selectedPaired.join(','));
+  fd.append('epochs',document.getElementById('cfgEpochs').value);
+  fd.append('batch_size',document.getElementById('cfgBatch').value);
+  fd.append('size',document.getElementById('cfgSize').value);
+  fd.append('lr',document.getElementById('cfgLR').value);
+  fd.append('base_channels',document.getElementById('cfgChannels').value);
+  fd.append('workers',document.getElementById('cfgWorkers').value);
+  fd.append('device',document.getElementById('cfgDevice').value);
+  fd.append('output',document.getElementById('cfgOutput').value);
+  const mt=parseInt(document.getElementById('cfgMaxTrain').value)||0;
+  const mv=parseInt(document.getElementById('cfgMaxVal').value)||0;
+  fd.append('max_train_samples',mt);
+  fd.append('max_val_samples',mv);
+  try{
+    const r=await fetch('/api/training/start',{method:'POST',headers:hdr,body:fd});
+    const d=await r.json();
+    if(!r.ok)throw new Error(d.detail||'Start failed');
+    showToast('Training dimulai! (PID: '+d.pid+')');
+    document.getElementById('runningCard').style.display='block';
+    startLogPolling();
+  }catch(e){showToast(e.message,'error');}
+}
+
+async function stopTraining(){
+  try{
+    await fetch('/api/training/stop',{method:'POST',headers:hdr});
+    showToast('Training dihentikan');
+    document.getElementById('runningCard').style.display='none';
+    stopLogPolling();
+    refreshStatus();
+  }catch(e){showToast(e.message,'error');}
+}
+
+// === LOG POLLING ===
+let logOffset=0;
+function startLogPolling(){
+  logOffset=0;
+  document.getElementById('logBox').textContent='';
+  if(logPoller)clearInterval(logPoller);
+  logPoller=setInterval(pollLog,2000);
+  pollLog();
+}
+function stopLogPolling(){if(logPoller){clearInterval(logPoller);logPoller=null;}}
+async function pollLog(){
+  try{
+    const r=await fetch('/api/training/log?offset='+logOffset,{headers:hdr});
+    const d=await r.json();
+    if(d.lines&&d.lines.length){
+      const box=document.getElementById('logBox');
+      box.textContent+=d.lines.join('\n')+'\n';
+      box.scrollTop=box.scrollHeight;
+      logOffset=d.total;
+    }
+    if(!d.running){
+      stopLogPolling();
+      document.getElementById('runningCard').style.display='none';
+      refreshStatus();
+      showToast('Training selesai!');
+    }
+  }catch(e){}
+}
+function clearLog(){document.getElementById('logBox').textContent='';logOffset=0;}
+function refreshLog(){pollLog();}
+
+// === STATUS ===
+async function refreshStatus(){
+  try{
+    const r=await fetch('/api/training/status',{headers:hdr});
+    const d=await r.json();
+    const running=document.getElementById('runningCard').style.display!=='none';
+    document.getElementById('stStatus').textContent=running?'Running':(d.best_exists?'Ready':'No model');
+    document.getElementById('stStatus').className='v '+(running?'yellow':(d.best_exists?'green':''));
+    document.getElementById('stEpochs').textContent=d.epochs||'0';
+    document.getElementById('stBestLoss').textContent=d.has_history?Math.min(...(d.history.val_loss||[Infinity]).filter(v=>v>0)).toFixed(4):'-';
+    if(d.has_history){
+      drawChart(d.history.train_loss||[],d.history.val_loss||[]);
+      renderTrainInfo(d);
+    }
+    document.getElementById('lastUpdate').textContent='Updated: '+new Date().toLocaleTimeString();
+  }catch(e){}
+}
+
+function renderTrainInfo(d){
+  const tl=d.history.train_loss||[];
+  const vl=d.history.val_loss||[];
+  document.getElementById('trainInfo').innerHTML=`
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.75rem">
+      <div><span style="color:var(--text3)">Total Epochs:</span> <strong>${d.epochs}</strong></div>
+      <div><span style="color:var(--text3)">Best Val Loss:</span> <strong style="color:var(--success)">${Math.min(...vl.filter(v=>v>0)).toFixed(4)}</strong></div>
+      <div><span style="color:var(--text3)">Last Train:</span> <strong>${tl.length?tl[tl.length-1].toFixed(4):'-'}</strong></div>
+      <div><span style="color:var(--text3)">Last Val:</span> <strong>${vl.length?vl[vl.length-1].toFixed(4):'-'}</strong></div>
+      <div><span style="color:var(--text3)">Best Model:</span> <strong style="color:${d.best_exists?'var(--success)':'var(--text3)'}">best.pth</strong></div>
+      <div><span style="color:var(--text3)">Checkpoint:</span> <strong style="color:${d.last_exists?'var(--success)':'var(--text3)'}">last.pth</strong></div>
+    </div>
+  `;
+}
+
+function drawChart(trainLoss,valLoss){
+  const ctx=document.getElementById('lossChart');
+  if(!ctx)return;
+  if(lossChart)lossChart.destroy();
+  const labels=trainLoss.map((_,i)=>i+1);
+  lossChart=new Chart(ctx.getContext('2d'),{
+    type:'line',
+    data:{
+      labels,
+      datasets:[
+        {label:'Train Loss',data:trainLoss,borderColor:'#6366f1',backgroundColor:'rgba(99,102,241,0.1)',tension:0.3,fill:true,pointRadius:1,pointHoverRadius:4,borderWidth:2},
+        {label:'Val Loss',data:valLoss,borderColor:'#22d3ee',backgroundColor:'rgba(34,211,238,0.1)',tension:0.3,fill:true,pointRadius:1,pointHoverRadius:4,borderWidth:2},
+      ]
+    },
+    options:{
+      responsive:true,maintainAspectRatio:false,
+      interaction:{mode:'index',intersect:false},
+      plugins:{legend:{labels:{color:'#a1a1aa',font:{size:11},usePointStyle:true,pointStyle:'circle'}},
+        tooltip:{backgroundColor:'#18181b',titleColor:'#fafafa',bodyColor:'#a1a1aa',borderColor:'#27272a',borderWidth:1}},
+      scales:{
+        x:{title:{display:true,text:'Epoch',color:'#71717a'},ticks:{color:'#71717a',maxTicksLimit:15,font:{size:10}},grid:{color:'rgba(255,255,255,0.03)'}},
+        y:{title:{display:true,text:'Loss',color:'#71717a'},ticks:{color:'#71717a',font:{size:10}},grid:{color:'rgba(255,255,255,0.05)'}}
+      }
+    }
+  });
+}
+
+// === SAMPLES ===
+async function loadSamples(){
+  try{
+    const r=await fetch('/api/training/status',{headers:hdr});
+    const d=await r.json();
+    if(!d.has_history||d.epochs<1){
+      document.getElementById('samplesGrid').innerHTML='<div style="color:var(--text3)">Belum ada sample. Mulai training terlebih dahulu.</div>';
+      return;
+    }
+    // Try to load sample images from checkpoint dir
+    const g=document.getElementById('samplesGrid');
+    g.innerHTML='<div style="color:var(--text3)">Sample tersimpan di checkpoints/document_restorer/samples/</div>';
+  }catch(e){}
+}
+
+// === REFRESH ALL ===
+async function refreshAll(){
+  await Promise.all([loadDatasets(),refreshStatus(),loadSamples()]);
+}
+
+function copyCmd(){navigator.clipboard.writeText(buildCmd()).then(()=>showToast('Command copied!')).catch(()=>showToast('Copy failed','error'));}
+
+// Init
+refreshAll();
+lucide.createIcons();
+</script>
+</body>
+</html>

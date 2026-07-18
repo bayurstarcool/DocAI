@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="id">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Doc Shadow Dataset Explorer</title>
+  <style>
+    :root{color-scheme:dark;--bg:#07111f;--panel:#11182d;--panel2:#0b1224;--text:#e5e7eb;--muted:#94a3b8;--line:#26324d;--brand:#38bdf8;--ok:#22c55e}
+    *{box-sizing:border-box} body{margin:0;background:radial-gradient(circle at top,#172554,#07111f 58%);font-family:Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,sans-serif;color:var(--text);-webkit-text-size-adjust:100%}
+    header{max-width:1280px;margin:auto;padding:clamp(14px,3vw,26px);display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:16px} h1{margin:0;font-size:clamp(20px,3.5vw,30px)} p{color:var(--muted);margin:6px 0 0} a{color:var(--brand);text-decoration:none;font-weight:700}
+    main{max-width:1280px;margin:0 auto 32px;padding:0 clamp(14px,3vw,26px)} .toolbar{background:rgba(17,24,45,.96);border:1px solid var(--line);border-radius:18px;padding:16px;display:grid;grid-template-columns:minmax(240px,1fr) 120px auto auto;gap:12px;align-items:end;box-shadow:0 20px 60px rgba(0,0,0,.28)}.field label{font-size:12px;color:var(--muted);display:block;margin-bottom:6px} select,input{width:100%;border:1px solid var(--line);background:var(--panel2);color:var(--text);border-radius:10px;padding:10px 12px} button{border:0;border-radius:12px;padding:11px 14px;color:#00111f;background:var(--brand);font-weight:800;cursor:pointer}.stats{margin:12px 0;color:var(--muted)}
+    .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:16px}.card{background:rgba(17,24,45,.92);border:1px solid var(--line);border-radius:18px;padding:12px}.card h3{margin:0 0 10px;font-size:14px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.triplet{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px}.single{display:grid;grid-template-columns:1fr}.imgbox{background:#020617;border:1px solid var(--line);border-radius:12px;padding:6px}.imgbox span{display:block;font-size:11px;color:var(--muted);margin-bottom:5px}.imgbox img{width:100%;height:190px;object-fit:contain;border-radius:8px;background:#000}.pager{display:flex;gap:10px;align-items:center;margin:16px 0}.small{font-size:12px;color:var(--muted)}
+    @media(max-width:900px){.toolbar{grid-template-columns:1fr 1fr}.toolbar .field:first-child{grid-column:1/-1}}@media(max-width:640px){nav{width:100%;display:flex;gap:10px;flex-wrap:wrap}.toolbar{grid-template-columns:1fr}.triplet{grid-template-columns:1fr}.imgbox img{height:auto}.grid{grid-template-columns:1fr}}
+  </style>
+</head>
+<body>
+<header><div><h1>Dataset Explorer</h1><p>Preview dataset paired: shadow / clean / mask.</p></div><nav style="display:flex;gap:14px"><a href="/train-ui/">Training</a><a href="/studio/">Studio</a></nav></header>
+<main>
+  <div class="toolbar">
+    <div class="field"><label>Dataset</label><select id="dataset"></select></div>
+    <div class="field"><label>Limit</label><input id="limit" type="number" min="6" max="60" value="18"></div>
+    <button id="prev">Prev</button><button id="next">Next</button>
+  </div>
+  <div id="stats" class="stats">Loading...</div>
+  <div id="grid" class="grid"></div>
+</main>
+<script>
+const $=id=>document.getElementById(id); let offset=0, total=0, kind='paired';
+async function init(){ const r=await fetch('/dataset/list'); const j=await r.json(); $('dataset').innerHTML=j.datasets.map(d=>`<option value="${d.name}">${d.name} (${d.kind}, ${d.count})</option>`).join(''); const preferred=[...$('dataset').options].find(o=>o.value==='data/open_pairs'); if(preferred) preferred.selected=true; await load(0); }
+async function load(nextOffset){ offset=Math.max(0,nextOffset); const name=$('dataset').value; const limit=Number($('limit').value||18); const r=await fetch(`/dataset/items?name=${encodeURIComponent(name)}&offset=${offset}&limit=${limit}`); const j=await r.json(); total=j.count; kind=j.kind; $('stats').textContent=`${j.name} • ${j.kind} • ${j.count} items • showing ${j.offset+1}-${Math.min(j.offset+j.items.length,j.count)}`; $('grid').innerHTML=j.items.map(card).join(''); $('prev').disabled=offset<=0; $('next').disabled=offset+limit>=total; }
+function card(item){ if(kind==='paired') return `<div class="card"><h3>${item.name}</h3><div class="triplet"><div class="imgbox"><span>shadow</span><img src="${item.shadow}"></div><div class="imgbox"><span>clean</span><img src="${item.clean}"></div><div class="imgbox"><span>mask</span><img src="${item.mask}"></div></div></div>`; return `<div class="card"><h3>${item.name}</h3><div class="single"><div class="imgbox"><span>image</span><img src="${item.image}"></div></div></div>`; }
+$('dataset').onchange=()=>load(0); $('limit').onchange=()=>load(0); $('prev').onclick=()=>load(offset-Number($('limit').value||18)); $('next').onclick=()=>load(offset+Number($('limit').value||18)); init();
+</script>
+</body>
+</html>

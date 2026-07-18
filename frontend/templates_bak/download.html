@@ -1,0 +1,388 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DocAI - Download Dataset</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>
+    <style>
+        :root {
+            --primary: #6366f1; --bg: #09090b; --bg2: #0f0f12; --bg3: #18181b;
+            --surface: #27272a; --border: #27272a;
+            --text: #fafafa; --text2: #a1a1aa; --text3: #71717a;
+            --accent: #06b6d4; --accent2: #22d3ee;
+            --success: #10b981; --warning: #f59e0b; --error: #ef4444;
+            --gradient-1: linear-gradient(135deg, #6366f1, #06b6d4);
+            --radius: 16px; --radius-sm: 12px; --radius-xs: 8px;
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: 'Inter', -apple-system, sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; }
+        .bg-grid { position: fixed; inset: 0; z-index: 0; pointer-events: none; background-image: radial-gradient(circle at 1px 1px, rgba(99,102,241,0.06) 1px, transparent 0); background-size: 40px 40px; }
+        
+        /* Navbar */
+        .navbar { position: sticky; top: 0; z-index: 100; background: rgba(9,9,11,0.75); backdrop-filter: blur(16px); border-bottom: 1px solid var(--border); }
+        .nav-inner { max-width: 1280px; margin: 0 auto; padding: 0 1.5rem; height: 64px; display: flex; align-items: center; justify-content: space-between; }
+        .logo { display: flex; align-items: center; gap: 0.625rem; text-decoration: none; }
+        .logo-mark { width: 36px; height: 36px; background: var(--gradient-1); border-radius: 10px; display: grid; place-items: center; color: white; }
+        .logo-mark i { width: 20px; height: 20px; }
+        .logo-text { font-size: 1.125rem; font-weight: 700; color: var(--text); }
+        .nav-links { display: flex; gap: 0.25rem; }
+        .nav-links a { color: var(--text2); text-decoration: none; font-weight: 500; font-size: 0.875rem; padding: 0.5rem 0.875rem; border-radius: var(--radius-xs); transition: all 0.15s; display: flex; align-items: center; gap: 0.5rem; }
+        .nav-links a i { width: 16px; height: 16px; }
+        .nav-links a:hover { color: var(--text); background: var(--bg3); }
+        .nav-links a.active { color: var(--accent2); background: rgba(6,182,212,0.1); }
+        .nav-right { display: flex; align-items: center; gap: 0.75rem; }
+        .user-chip { display: flex; align-items: center; gap: 0.5rem; padding: 0.375rem 0.75rem 0.375rem 0.375rem; background: var(--bg3); border: 1px solid var(--border); border-radius: 999px; }
+        .user-avatar { width: 28px; height: 28px; background: linear-gradient(135deg, #8b5cf6, #ec4899); border-radius: 50%; display: grid; place-items: center; color: white; }
+        .user-avatar i { width: 14px; height: 14px; }
+        .user-chip span { font-size: 0.8rem; font-weight: 500; }
+        .btn-logout { display: flex; align-items: center; padding: 0.5rem; background: transparent; border: 1px solid var(--border); border-radius: var(--radius-xs); color: var(--text2); cursor: pointer; transition: all 0.15s; }
+        .btn-logout i { width: 16px; height: 16px; }
+        .btn-logout:hover { border-color: var(--error); color: var(--error); }
+        .nav-toggle { display: none; background: none; border: 1px solid var(--border); color: var(--text2); cursor: pointer; padding: 0.5rem; border-radius: var(--radius-xs); }
+        .nav-toggle i { width: 20px; height: 20px; }
+        .nav-mobile { display: none; position: absolute; top: 64px; left: 0; right: 0; background: var(--bg2); border-bottom: 1px solid var(--border); padding: 0.75rem; z-index: 200; }
+        .nav-mobile.open { display: block; }
+        .nav-mobile a { display: flex; align-items: center; gap: 0.75rem; padding: 0.75rem 1rem; color: var(--text2); text-decoration: none; border-radius: var(--radius-xs); font-weight: 500; font-size: 0.9rem; }
+        .nav-mobile a i { width: 18px; height: 18px; }
+        .nav-mobile a:hover { background: var(--bg3); color: var(--text); }
+        .nav-mobile a.active { color: var(--accent2); background: rgba(6,182,212,0.1); }
+        .nav-mobile-divider { height: 1px; background: var(--border); margin: 0.5rem 0; }
+        .nav-mobile-user { display: flex; align-items: center; justify-content: space-between; padding: 0.5rem; }
+        @media (max-width: 768px) { .nav-links { display: none !important; } .nav-toggle { display: flex; } .user-chip .user-name { display: none; } }
+
+        /* Layout */
+        .container { max-width: 900px; margin: 0 auto; padding: 2rem 1.5rem; position: relative; z-index: 1; }
+        .page-header { margin-bottom: 2rem; }
+        .page-header h1 { font-size: 1.5rem; font-weight: 700; display: flex; align-items: center; gap: 0.5rem; }
+        .page-header h1 i { width: 24px; height: 24px; color: var(--accent); }
+        .page-header p { color: var(--text2); font-size: 0.85rem; margin-top: 0.25rem; }
+
+        /* Cards */
+        .card { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius); padding: 1.5rem; margin-bottom: 1.5rem; }
+        .card-title { display: flex; align-items: center; gap: 0.5rem; font-size: 1rem; font-weight: 600; margin-bottom: 1rem; }
+        .card-title i { width: 20px; height: 20px; color: var(--accent); }
+
+        /* Dataset Info */
+        .dataset-info { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 1rem; margin-bottom: 1.5rem; }
+        .info-item { background: var(--bg3); border-radius: var(--radius-xs); padding: 1rem; text-align: center; }
+        .info-item .value { font-size: 1.5rem; font-weight: 700; color: var(--accent2); }
+        .info-item .label { font-size: 0.75rem; color: var(--text3); margin-top: 0.25rem; }
+
+        /* Progress Bar */
+        .progress-container { margin: 1.5rem 0; }
+        .progress-header { display: flex; justify-content: space-between; margin-bottom: 0.5rem; }
+        .progress-header span { font-size: 0.85rem; color: var(--text2); }
+        .progress-header .percent { font-weight: 600; color: var(--accent2); }
+        .progress-bar { height: 12px; background: var(--bg3); border-radius: 6px; overflow: hidden; }
+        .progress-fill { height: 100%; background: var(--gradient-1); border-radius: 6px; transition: width 0.5s ease; }
+        .progress-stats { display: flex; justify-content: space-between; margin-top: 0.75rem; font-size: 0.8rem; color: var(--text3); }
+
+        /* Buttons */
+        .btn { display: inline-flex; align-items: center; gap: 0.5rem; padding: 0.75rem 1.5rem; border: none; border-radius: var(--radius-xs); font-size: 0.9rem; font-weight: 600; cursor: pointer; transition: all 0.15s; font-family: inherit; }
+        .btn i { width: 16px; height: 16px; }
+        .btn-primary { background: var(--gradient-1); color: white; }
+        .btn-primary:hover { transform: translateY(-1px); box-shadow: 0 4px 16px rgba(99,102,241,0.35); }
+        .btn-danger { background: var(--error); color: white; }
+        .btn-secondary { background: var(--bg3); color: var(--text); border: 1px solid var(--border); }
+        .btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none !important; }
+        .btn-row { display: flex; gap: 0.75rem; flex-wrap: wrap; }
+
+        /* Status Badge */
+        .status-badge { display: inline-flex; align-items: center; gap: 0.375rem; padding: 0.375rem 0.75rem; border-radius: 999px; font-size: 0.75rem; font-weight: 500; }
+        .status-idle { background: rgba(113,113,122,0.15); color: var(--text3); }
+        .status-downloading { background: rgba(6,182,212,0.15); color: var(--accent2); }
+        .status-completed { background: rgba(16,185,129,0.15); color: var(--success); }
+        .status-error { background: rgba(239,68,68,0.15); color: var(--error); }
+
+        /* Download Steps */
+        .steps { margin-top: 1.5rem; }
+        .step { display: flex; gap: 1rem; padding: 1rem 0; border-bottom: 1px solid var(--border); }
+        .step:last-child { border-bottom: none; }
+        .step-num { width: 32px; height: 32px; border-radius: 50%; background: var(--bg3); display: grid; place-items: center; font-size: 0.85rem; font-weight: 700; flex-shrink: 0; }
+        .step-num.active { background: var(--accent); color: white; }
+        .step-num.done { background: var(--success); color: white; }
+        .step-content h4 { font-size: 0.9rem; font-weight: 600; margin-bottom: 0.25rem; }
+        .step-content p { font-size: 0.8rem; color: var(--text2); }
+        .step-content code { background: var(--bg3); padding: 0.2rem 0.5rem; border-radius: 4px; font-size: 0.75rem; }
+
+        /* Log */
+        .log-box { background: #000; border-radius: var(--radius-xs); padding: 1rem; max-height: 200px; overflow-y: auto; font-family: 'JetBrains Mono', monospace; font-size: 0.75rem; color: var(--success); margin-top: 1rem; line-height: 1.6; }
+
+        .footer { text-align: center; padding: 2rem; color: var(--text3); font-size: 0.8rem; border-top: 1px solid var(--border); margin-top: 2rem; }
+    </style>
+</head>
+<body>
+    <div class="bg-grid"></div>
+    <nav class="navbar">
+        <div class="nav-inner">
+            <a href="/" class="logo"><div class="logo-mark"><i data-lucide="scan-eye"></i></div><span class="logo-text">DocAI</span></a>
+            <div class="nav-links" id="navLinks">
+                <a href="/"><i data-lucide="layout-dashboard"></i> <span class="nav-text">Beranda</span></a>
+                <a href="/test"><i data-lucide="flask-conical"></i> <span class="nav-text">Test Model</span></a>
+                <a href="/train"><i data-lucide="graduation-cap"></i> <span class="nav-text">Training</span></a>
+                <a href="/datasets"><i data-lucide="database"></i> <span class="nav-text">Datasets</span></a>
+            </div>
+            <div class="nav-right">
+                <div class="user-chip"><div class="user-avatar"><i data-lucide="user"></i></div><span class="user-name" id="userDisplay">admin</span></div>
+                <button class="btn-logout" onclick="logout()"><i data-lucide="log-out"></i></button>
+                <button class="nav-toggle" onclick="toggleNav()"><i data-lucide="menu"></i></button>
+            </div>
+        </div>
+        <div class="nav-mobile" id="navMobile">
+            <a href="/"><i data-lucide="layout-dashboard"></i> Beranda</a>
+            <a href="/test"><i data-lucide="flask-conical"></i> Test Model</a>
+            <a href="/train"><i data-lucide="graduation-cap"></i> Training</a>
+            <a href="/datasets"><i data-lucide="database"></i> Datasets</a>
+            <div class="nav-mobile-divider"></div>
+            <div class="nav-mobile-user">
+                <div class="user-chip"><div class="user-avatar"><i data-lucide="user"></i></div><span id="userDisplayMobile">admin</span></div>
+                <button class="btn-logout" onclick="logout()"><i data-lucide="log-out"></i> Logout</button>
+            </div>
+        </div>
+    </nav>
+
+    <div class="container">
+        <div class="page-header">
+            <h1><i data-lucide="download"></i> Download Dataset</h1>
+            <p>Download ShadowDocument7K dataset untuk training model</p>
+        </div>
+
+        <!-- Dataset Info -->
+        <div class="card">
+            <div class="card-title"><i data-lucide="database"></i> ShadowDocument7K</div>
+            <div class="dataset-info">
+                <div class="info-item">
+                    <div class="value">7K+</div>
+                    <div class="label">Images</div>
+                </div>
+                <div class="info-item">
+                    <div class="value">2K</div>
+                    <div class="label">Resolution</div>
+                </div>
+                <div class="info-item">
+                    <div class="value">5.1 GB</div>
+                    <div class="label">Size</div>
+                </div>
+                <div class="info-item">
+                    <div class="value">ICCV'23</div>
+                    <div class="label">Paper</div>
+                </div>
+            </div>
+
+            <!-- Progress -->
+            <div class="progress-container">
+                <div class="progress-header">
+                    <span>Download Progress</span>
+                    <span class="percent" id="progressPercent">0%</span>
+                </div>
+                <div class="progress-bar">
+                    <div class="progress-fill" id="progressFill" style="width: 0%"></div>
+                </div>
+                <div class="progress-stats">
+                    <span id="progressFiles">40 / 7000+ files</span>
+                    <span id="progressSize">444 MB / 5.1 GB</span>
+                </div>
+            </div>
+
+            <!-- Status -->
+            <div style="display: flex; align-items: center; justify-content: space-between; margin-top: 1rem;">
+                <div class="status-badge status-idle" id="statusBadge">
+                    <i data-lucide="circle"></i> <span id="statusText">Idle</span>
+                </div>
+                <div class="btn-row">
+                    <button class="btn btn-primary" id="btnDownload" onclick="startDownload()">
+                        <i data-lucide="download"></i> Start Download
+                    </button>
+                    <button class="btn btn-danger" id="btnStop" onclick="stopDownload()" style="display: none;">
+                        <i data-lucide="square"></i> Stop
+                    </button>
+                    <button class="btn btn-secondary" onclick="refreshStatus()">
+                        <i data-lucide="refresh-cw"></i> Refresh
+                    </button>
+                </div>
+            </div>
+
+            <!-- Log -->
+            <div class="log-box" id="logBox">
+                > Ready to download ShadowDocument7K dataset<br>
+                > Click "Start Download" to begin<br>
+            </div>
+        </div>
+
+        <!-- Manual Download Steps -->
+        <div class="card" style="border-color: var(--accent);">
+            <div class="card-title" style="color: var(--accent2);"><i data-lucide="zap"></i> Fastest: Download via Browser (Recommended)</div>
+            <p style="color: var(--text2); font-size: 0.85rem; margin-bottom: 1rem;">
+                The CLI download is slow for large datasets. Use browser download instead:
+            </p>
+            <div class="steps">
+                <div class="step">
+                    <div class="step-num">1</div>
+                    <div class="step-content">
+                        <h4>Go to OpenXLab</h4>
+                        <p>Open <a href="https://openxlab.org.cn/datasets/lkljty/ShadowDocument7K" target="_blank" style="color: var(--accent2);">https://openxlab.org.cn/datasets/lkljty/ShadowDocument7K</a></p>
+                    </div>
+                </div>
+                <div class="step">
+                    <div class="step-num">2</div>
+                    <div class="step-content">
+                        <h4>Download ZIP</h4>
+                        <p>Click the "Download" button and download the dataset ZIP file (~5 GB)</p>
+                    </div>
+                </div>
+                <div class="step">
+                    <div class="step-num">3</div>
+                    <div class="step-content">
+                        <h4>Upload to Server</h4>
+                        <p>Upload the ZIP file to <code>/home/wahyu/docai/datasets/</code></p>
+                    </div>
+                </div>
+                <div class="step">
+                    <div class="step-num">4</div>
+                    <div class="step-content">
+                        <h4>Extract</h4>
+                        <p>Run: <code>cd /home/wahyu/docai && python3 prepare_dataset.py</code></p>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Alternative Datasets -->
+        <div class="card">
+            <div class="card-title"><i data-lucide="folder-open"></i> Alternative Datasets</div>
+            <div style="display: grid; gap: 1rem;">
+                <div style="display: flex; align-items: center; justify-content: space-between; padding: 1rem; background: var(--bg3); border-radius: var(--radius-xs);">
+                    <div>
+                        <div style="font-weight: 600; margin-bottom: 0.25rem;">Kligler Dataset</div>
+                        <div style="font-size: 0.8rem; color: var(--text3);">Document shadow dataset for evaluation</div>
+                    </div>
+                    <a href="https://www.kaggle.com/datasets/xuhangc/kliglers-dataset" target="_blank" class="btn btn-secondary" style="padding: 0.5rem 1rem; font-size: 0.8rem;">
+                        <i data-lucide="external-link"></i> Kaggle
+                    </a>
+                </div>
+                <div style="display: flex; align-items: center; justify-content: space-between; padding: 1rem; background: var(--bg3); border-radius: var(--radius-xs);">
+                    <div>
+                        <div style="font-weight: 600; margin-bottom: 0.25rem;">Jung Dataset</div>
+                        <div style="font-size: 0.8rem; color: var(--text3);">Document shadow dataset for evaluation</div>
+                    </div>
+                    <a href="https://www.kaggle.com/datasets/xuhangc/jungs-dataset" target="_blank" class="btn btn-secondary" style="padding: 0.5rem 1rem; font-size: 0.8rem;">
+                        <i data-lucide="external-link"></i> Kaggle
+                    </a>
+                </div>
+            </div>
+        </div>
+
+        <div class="footer">DocAI v1.0 — Download Dataset</div>
+    </div>
+
+    <script>
+        function toggleNav() { document.getElementById('navMobile').classList.toggle('open'); }
+        document.getElementById('userDisplay').textContent = localStorage.getItem('docai_user') || 'admin';
+        document.getElementById('userDisplayMobile').textContent = localStorage.getItem('docai_user') || 'admin';
+        function logout() { localStorage.removeItem('docai_token'); localStorage.removeItem('docai_user'); fetch('/api/auth/logout'); window.location.href = '/login'; }
+        lucide.createIcons();
+
+        const token = localStorage.getItem('docai_token');
+        const headers = { 'Authorization': 'Bearer ' + token };
+        let pollInterval = null;
+
+        function addLog(msg) {
+            const box = document.getElementById('logBox');
+            const time = new Date().toLocaleTimeString();
+            box.innerHTML += `<br>> [${time}] ${msg}`;
+            box.scrollTop = box.scrollHeight;
+        }
+
+        async function refreshStatus() {
+            try {
+                const res = await fetch('/api/datasets/shadow7k/progress', { headers });
+                if (res.status === 401) { window.location.href = '/login'; return; }
+                const data = await res.json();
+                
+                updateUI(data);
+            } catch(e) {
+                addLog('Error checking status: ' + e.message);
+            }
+        }
+
+        function updateUI(data) {
+            const percent = data.progress || 0;
+            document.getElementById('progressPercent').textContent = percent + '%';
+            document.getElementById('progressFill').style.width = percent + '%';
+            document.getElementById('progressFiles').textContent = `${data.total || 0} / 7000+ files`;
+            document.getElementById('progressSize').textContent = `${data.size_mb || 0} MB / 5.1 GB`;
+
+            const badge = document.getElementById('statusBadge');
+            const statusText = document.getElementById('statusText');
+            const btnDownload = document.getElementById('btnDownload');
+            const btnStop = document.getElementById('btnStop');
+
+            if (data.download_active) {
+                badge.className = 'status-badge status-downloading';
+                statusText.textContent = 'Downloading...';
+                btnDownload.style.display = 'none';
+                btnStop.style.display = 'inline-flex';
+            } else if (data.status === 'completed') {
+                badge.className = 'status-badge status-completed';
+                statusText.textContent = 'Completed';
+                btnDownload.style.display = 'inline-flex';
+                btnDownload.disabled = true;
+                btnStop.style.display = 'none';
+            } else if (percent > 0) {
+                badge.className = 'status-badge status-downloading';
+                statusText.textContent = 'Partial Download';
+                btnDownload.style.display = 'inline-flex';
+                btnStop.style.display = 'none';
+            } else {
+                badge.className = 'status-badge status-idle';
+                statusText.textContent = 'Not Started';
+                btnDownload.style.display = 'inline-flex';
+                btnStop.style.display = 'none';
+            }
+        }
+
+        async function startDownload() {
+            addLog('Starting download...');
+            try {
+                const res = await fetch('/api/datasets/download', { method: 'POST', headers });
+                const data = await res.json();
+                if (data.success) {
+                    addLog('Download started!');
+                    startPolling();
+                } else {
+                    addLog('Error: ' + (data.error || 'Unknown'));
+                }
+            } catch(e) {
+                addLog('Error: ' + e.message);
+            }
+        }
+
+        async function stopDownload() {
+            addLog('Stopping download...');
+            try {
+                await fetch('/api/datasets/download/stop', { method: 'POST', headers });
+                addLog('Download stopped');
+                stopPolling();
+                refreshStatus();
+            } catch(e) {
+                addLog('Error: ' + e.message);
+            }
+        }
+
+        function startPolling() {
+            stopPolling();
+            pollInterval = setInterval(refreshStatus, 5000);
+        }
+
+        function stopPolling() {
+            if (pollInterval) { clearInterval(pollInterval); pollInterval = null; }
+        }
+
+        // Initial status check
+        refreshStatus();
+    </script>
+</body>
+</html>

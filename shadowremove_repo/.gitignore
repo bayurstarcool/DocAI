@@ -1,0 +1,40 @@
+# OS/editor
+.DS_Store
+.idea/
+.vscode/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtualenv
+.venv/
+.venv*/
+venv/
+.venv-rocm/
+
+# Secrets/env
+.env
+.env.*
+.admin_env
+*.pem
+*.key
+
+# Data and generated artifacts
+datasetku/
+data/
+models/
+runs/
+exports/
+*.pth
+*.pt
+*.onnx
+*.log
+uvicorn.pid
+
+# ROCm/MIOpen cache
+.miopen/

@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+.env
+.admin_env
+
+# Node / frontend
+frontend/node_modules/
+frontend/dist/
+node_modules/
+
+# AI artifacts / datasets
+checkpoints/
+*.pth
+*.pt
+*.onnx
+*.ckpt
+*.zip
+runs/
+exports/
+data/
+datasets/
+models/
+
+# Logs / OS
+*.log
+.DS_Store
+
+# Nested repo metadata
+**/.git/
+.git_nested_backup/

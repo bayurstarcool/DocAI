@@ -1,0 +1,658 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DocAI - Dashboard</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+<script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>
+<style>
+:root{--primary:#6366f1;--bg:#09090b;--bg2:#0f0f12;--bg3:#18181b;--surface:#27272a;--border:#27272a;--text:#fafafa;--text2:#a1a1aa;--text3:#71717a;--accent:#06b6d4;--accent2:#22d3ee;--success:#10b981;--warning:#f59e0b;--error:#ef4444;--gradient-1:linear-gradient(135deg,#6366f1,#06b6d4);--radius:16px;--radius-sm:12px;--radius-xs:8px}
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'Inter',-apple-system,sans-serif;background:var(--bg);color:var(--text);min-height:100vh}
+.bg-grid{position:fixed;inset:0;z-index:0;pointer-events:none;background-image:radial-gradient(circle at 1px 1px,rgba(99,102,241,0.06) 1px,transparent 0);background-size:40px 40px}
+
+/* Navbar */
+.navbar{position:sticky;top:0;z-index:100;background:rgba(9,9,11,0.75);backdrop-filter:blur(16px);border-bottom:1px solid var(--border)}
+.nav-inner{max-width:1280px;margin:0 auto;padding:0 1.5rem;height:64px;display:flex;align-items:center;justify-content:space-between}
+.logo{display:flex;align-items:center;gap:0.625rem;text-decoration:none}
+.logo-mark{width:36px;height:36px;background:var(--gradient-1);border-radius:10px;display:grid;place-items:center;color:white}
+.logo-mark i{width:20px;height:20px}
+.logo-text{font-size:1.125rem;font-weight:700;color:var(--text)}
+.nav-links{display:flex;gap:0.25rem}
+.nav-links a{color:var(--text2);text-decoration:none;font-weight:500;font-size:0.875rem;padding:0.5rem 0.875rem;border-radius:var(--radius-xs);transition:all 0.15s;display:flex;align-items:center;gap:0.5rem}
+.nav-links a i{width:16px;height:16px}
+.nav-links a:hover{color:var(--text);background:var(--bg3)}
+.nav-links a.active{color:var(--accent2);background:rgba(6,182,212,0.1)}
+.nav-right{display:flex;align-items:center;gap:0.75rem}
+.user-chip{display:flex;align-items:center;gap:0.5rem;padding:0.375rem 0.75rem 0.375rem 0.375rem;background:var(--bg3);border:1px solid var(--border);border-radius:999px}
+.user-avatar{width:28px;height:28px;background:linear-gradient(135deg,#8b5cf6,#ec4899);border-radius:50%;display:grid;place-items:center;color:white}
+.user-avatar i{width:14px;height:14px}
+.user-chip span{font-size:0.8rem;font-weight:500}
+.btn-logout{display:flex;align-items:center;padding:0.5rem;background:transparent;border:1px solid var(--border);border-radius:var(--radius-xs);color:var(--text2);cursor:pointer;transition:all 0.15s}
+.btn-logout i{width:16px;height:16px}
+.btn-logout:hover{border-color:var(--error);color:var(--error)}
+.nav-toggle{display:none;background:none;border:1px solid var(--border);color:var(--text2);cursor:pointer;padding:0.5rem;border-radius:var(--radius-xs)}
+.nav-toggle i{width:20px;height:20px}
+.nav-mobile{display:none;position:absolute;top:64px;left:0;right:0;background:var(--bg2);border-bottom:1px solid var(--border);padding:0.75rem;z-index:200}
+.nav-mobile.open{display:block}
+.nav-mobile a{display:flex;align-items:center;gap:0.75rem;padding:0.75rem 1rem;color:var(--text2);text-decoration:none;border-radius:var(--radius-xs);font-weight:500;font-size:0.9rem}
+.nav-mobile a i{width:18px;height:18px}
+.nav-mobile a:hover{background:var(--bg3);color:var(--text)}
+.nav-mobile a.active{color:var(--accent2);background:rgba(6,182,212,0.1)}
+@media(max-width:768px){.nav-links{display:none!important}.nav-toggle{display:flex}.user-chip .user-name{display:none}}
+
+/* Layout */
+.container{max-width:1280px;margin:0 auto;padding:2rem 1.5rem;position:relative;z-index:1}
+.page-header{margin-bottom:2rem}
+.page-header h1{font-size:1.5rem;font-weight:700}
+.page-header p{color:var(--text2);margin-top:0.25rem;font-size:0.9rem}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:1rem;margin-bottom:2rem}
+.stat-card{background:var(--bg3);border:1px solid var(--border);border-radius:var(--radius-sm);padding:1.25rem}
+.stat-card .label{font-size:0.75rem;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:0.5rem}
+.stat-card .value{font-size:1.5rem;font-weight:700}
+.stat-card .value.accent{color:var(--accent2)}
+.stat-card .value.success{color:var(--success)}
+.card{background:var(--bg3);border:1px solid var(--border);border-radius:var(--radius);padding:1.5rem;margin-bottom:1.5rem}
+.card h2{font-size:1.1rem;font-weight:600;margin-bottom:1rem;display:flex;align-items:center;gap:0.5rem}
+.card h2 i{width:20px;height:20px;color:var(--accent2)}
+
+/* Upload */
+.upload-zone{border:2px dashed var(--border);border-radius:var(--radius-sm);padding:2.5rem;text-align:center;cursor:pointer;transition:all 0.2s}
+.upload-zone:hover,.upload-zone.dragover{border-color:var(--accent);background:rgba(6,182,212,0.05)}
+.upload-zone i{width:48px;height:48px;color:var(--text3);margin-bottom:0.75rem}
+.upload-zone p{font-weight:500;color:var(--text2)}
+.upload-zone .hint{font-size:0.75rem;color:var(--text3);margin-top:0.5rem}
+
+/* Modes */
+.mode-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:0.5rem}
+.mode-btn{display:flex;align-items:center;gap:0.5rem;padding:0.625rem 0.75rem;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius-xs);color:var(--text2);cursor:pointer;font-size:0.8rem;font-weight:500;transition:all 0.15s}
+.mode-btn i{width:16px;height:16px}
+.mode-btn:hover{border-color:var(--accent);color:var(--text)}
+.mode-btn.active{border-color:var(--accent);background:rgba(6,182,212,0.1);color:var(--accent2)}
+.process-bar{display:flex;align-items:center;gap:0.75rem;margin-top:1.25rem;padding-top:1.25rem;border-top:1px solid var(--border)}
+
+/* Buttons */
+.btn{display:inline-flex;align-items:center;gap:0.5rem;padding:0.625rem 1.25rem;border-radius:var(--radius-xs);font-size:0.875rem;font-weight:600;cursor:pointer;border:none;transition:all 0.15s}
+.btn i{width:16px;height:16px}
+.btn-primary{background:var(--primary);color:white}
+.btn-primary:hover{background:#5558e6}
+.btn-primary:disabled{opacity:0.5;cursor:not-allowed}
+.btn-secondary{background:var(--surface);color:var(--text);border:1px solid var(--border)}
+.btn-secondary:hover{border-color:var(--text3)}
+.btn-sm{padding:0.375rem 0.75rem;font-size:0.75rem}
+
+/* Results */
+.results-grid{display:none;grid-template-columns:1fr 1fr;gap:1.5rem;margin-top:1.5rem}
+.result-box{background:var(--bg3);border:1px solid var(--border);border-radius:var(--radius-sm);overflow:hidden}
+.result-box .header{padding:0.75rem 1rem;font-size:0.8rem;font-weight:600;color:var(--text2);border-bottom:1px solid var(--border);display:flex;align-items:center;gap:0.5rem}
+.result-box img{width:100%;display:block;cursor:pointer;transition:transform 0.2s}
+.result-box img:hover{transform:scale(1.02)}
+.spinner-box{display:flex;flex-direction:column;align-items:center;justify-content:center;padding:4rem 0;gap:1rem}
+.spinner{width:32px;height:32px;border:3px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:spin 0.8s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+/* Footer */
+.footer{text-align:center;padding:2rem 0;color:var(--text3);font-size:0.8rem}
+
+/* Toast */
+.toast{position:fixed;bottom:2rem;right:2rem;padding:0.75rem 1.25rem;border-radius:var(--radius-xs);font-size:0.85rem;font-weight:500;transform:translateY(100px);opacity:0;transition:all 0.3s;z-index:999}
+.toast.show{transform:translateY(0);opacity:1}
+.toast.success{background:var(--success);color:white}
+.toast.error{background:var(--error);color:white}
+
+/* ===== DATASET BROWSER ===== */
+.dataset-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:1rem;margin-top:1rem}
+.dataset-card{background:var(--bg);border:1px solid var(--border);border-radius:var(--radius-sm);padding:1.25rem;cursor:pointer;transition:all 0.2s}
+.dataset-card:hover{border-color:var(--accent);transform:translateY(-2px);box-shadow:0 8px 24px rgba(0,0,0,0.3)}
+.dataset-card .name{font-weight:600;font-size:0.95rem;margin-bottom:0.5rem;display:flex;align-items:center;gap:0.5rem}
+.dataset-card .name i{width:18px;height:18px;color:var(--accent2)}
+.dataset-card .meta{display:flex;gap:1rem;font-size:0.75rem;color:var(--text2)}
+.dataset-card .meta span{display:flex;align-items:center;gap:0.25rem}
+.dataset-card .meta i{width:12px;height:12px}
+.dataset-card .badge{display:inline-flex;padding:0.2rem 0.5rem;border-radius:999px;font-size:0.65rem;font-weight:700;text-transform:uppercase;letter-spacing:0.05em}
+.badge-paired{background:rgba(16,185,129,0.15);color:var(--success)}
+.badge-clean{background:rgba(99,102,241,0.15);color:var(--primary)}
+
+/* File Manager */
+.fm-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:500;backdrop-filter:blur(4px)}
+.fm-overlay.open{display:flex;align-items:center;justify-content:center}
+.fm-panel{width:95vw;max-width:1200px;height:85vh;background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius);display:flex;flex-direction:column;overflow:hidden}
+.fm-toolbar{display:flex;align-items:center;gap:0.75rem;padding:0.75rem 1rem;border-bottom:1px solid var(--border);background:var(--bg3)}
+.fm-toolbar .breadcrumb{display:flex;align-items:center;gap:0.25rem;flex:1;overflow-x:auto;white-space:nowrap}
+.fm-toolbar .breadcrumb button{background:none;border:none;color:var(--accent2);cursor:pointer;font-size:0.8rem;font-weight:500;padding:0.25rem 0.375rem;border-radius:4px}
+.fm-toolbar .breadcrumb button:hover{background:rgba(6,182,212,0.1)}
+.fm-toolbar .breadcrumb span{color:var(--text3);font-size:0.8rem}
+.fm-toolbar .info{font-size:0.75rem;color:var(--text3);white-space:nowrap}
+.fm-close{background:none;border:1px solid var(--border);color:var(--text2);cursor:pointer;padding:0.375rem;border-radius:var(--radius-xs);display:flex;align-items:center}
+.fm-close:hover{border-color:var(--error);color:var(--error)}
+.fm-close i{width:18px;height:18px}
+.fm-body{flex:1;overflow-y:auto;padding:1rem}
+.fm-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:0.75rem}
+.fm-item{background:var(--bg3);border:1px solid var(--border);border-radius:var(--radius-xs);overflow:hidden;cursor:pointer;transition:all 0.15s}
+.fm-item:hover{border-color:var(--accent);transform:translateY(-1px)}
+.fm-item.folder{display:flex;align-items:center;gap:0.75rem;padding:1rem}
+.fm-item.folder i{width:32px;height:32px;color:var(--warning);flex-shrink:0}
+.fm-item.folder .name{font-size:0.85rem;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.fm-item.image .thumb{width:100%;aspect-ratio:3/4;object-fit:cover;display:block;background:var(--surface)}
+.fm-item.image .info{padding:0.5rem 0.75rem;font-size:0.7rem;color:var(--text2);display:flex;justify-content:space-between;align-items:center}
+.fm-item.image .info .fname{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:70%}
+.fm-empty{display:flex;flex-direction:column;align-items:center;justify-content:center;padding:4rem 0;color:var(--text3);gap:0.75rem}
+.fm-empty i{width:48px;height:48px;opacity:0.3}
+.fm-loading{display:flex;align-items:center;justify-content:center;padding:3rem;color:var(--text3);gap:0.75rem}
+
+/* View mode toggle */
+.fm-view-toggle{display:flex;border:1px solid var(--border);border-radius:var(--radius-xs);overflow:hidden}
+.fm-view-toggle button{background:none;border:none;color:var(--text3);cursor:pointer;padding:0.375rem 0.5rem;display:flex;align-items:center}
+.fm-view-toggle button.active{background:var(--bg3);color:var(--accent2)}
+.fm-view-toggle button i{width:16px;height:16px}
+
+/* List view */
+.fm-list{display:flex;flex-direction:column;gap:2px}
+.fm-list .fm-item{display:flex;align-items:center;gap:0.75rem;padding:0.625rem 1rem;border-radius:var(--radius-xs)}
+.fm-list .fm-item .thumb-sm{width:40px;height:40px;object-fit:cover;border-radius:4px;flex-shrink:0;background:var(--surface)}
+.fm-list .fm-item i.folder-icon{width:24px;height:24px;color:var(--warning);flex-shrink:0}
+.fm-list .fm-item .name{flex:1;font-size:0.85rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.fm-list .fm-item .size{font-size:0.7rem;color:var(--text3);white-space:nowrap}
+
+/* Lightbox / Zoom */
+.lightbox{display:none;position:fixed;inset:0;background:rgba(0,0,0,0.92);z-index:600;flex-direction:column;align-items:center;justify-content:center}
+.lightbox.open{display:flex}
+.lightbox-close{position:absolute;top:1rem;right:1rem;background:none;border:none;color:white;cursor:pointer;z-index:10}
+.lightbox-close i{width:28px;height:28px}
+.lightbox-nav{position:absolute;top:50%;transform:translateY(-50%);background:rgba(255,255,255,0.1);border:none;color:white;cursor:pointer;padding:1rem;border-radius:var(--radius-xs);transition:background 0.15s}
+.lightbox-nav:hover{background:rgba(255,255,255,0.2)}
+.lightbox-nav.prev{left:1rem}
+.lightbox-nav.next{right:1rem}
+.lightbox-nav i{width:24px;height:24px}
+.lightbox-img{max-width:90vw;max-height:85vh;object-fit:contain;border-radius:4px;transition:transform 0.2s;cursor:grab}
+.lightbox-img.zoomed{cursor:grab;transform:scale(2)}
+.lightbox-info{position:absolute;bottom:1rem;color:rgba(255,255,255,0.7);font-size:0.8rem;display:flex;align-items:center;gap:1rem}
+.lightbox-info .zoom-controls{display:flex;gap:0.25rem}
+.lightbox-info .zoom-controls button{background:rgba(255,255,255,0.1);border:none;color:white;cursor:pointer;padding:0.375rem 0.625rem;border-radius:4px;font-size:0.75rem}
+.lightbox-info .zoom-controls button:hover{background:rgba(255,255,255,0.2)}
+
+@media(max-width:768px){
+  .results-grid{grid-template-columns:1fr}
+  .fm-panel{width:100vw;height:100vh;border-radius:0}
+  .fm-grid{grid-template-columns:repeat(auto-fill,minmax(120px,1fr))}
+}
+</style>
+</head>
+<body>
+<div class="bg-grid"></div>
+<nav class="navbar">
+<div class="nav-inner">
+  <a href="/" class="logo"><div class="logo-mark"><i data-lucide="scan-text"></i></div><span class="logo-text">DocAI</span></a>
+  <div class="nav-links">
+    <a href="/" class="active"><i data-lucide="layout-dashboard"></i>Dashboard</a>
+    <a href="/test"><i data-lucide="flask-conical"></i>Test Model</a>
+    <a href="/train"><i data-lucide="brain"></i>Training</a>
+    <a href="/image-tests"><i data-lucide="images"></i>Image Tests</a>
+    <a href="/datasets"><i data-lucide="database"></i>Datasets</a>
+  </div>
+  <div class="nav-right">
+    <div class="user-chip"><div class="user-avatar"><i data-lucide="user"></i></div><span class="user-name" id="userDisplay">admin</span></div>
+    <button class="btn-logout" onclick="logout()"><i data-lucide="log-out"></i></button>
+    <button class="nav-toggle" onclick="document.getElementById('navMobile').classList.toggle('open')"><i data-lucide="menu"></i></button>
+  </div>
+</div>
+<div class="nav-mobile" id="navMobile">
+  <a href="/" class="active"><i data-lucide="layout-dashboard"></i>Dashboard</a>
+  <a href="/test"><i data-lucide="flask-conical"></i>Test Model</a>
+  <a href="/train"><i data-lucide="brain"></i>Training</a>
+  <a href="/image-tests"><i data-lucide="images"></i>Image Tests</a>
+  <a href="/datasets"><i data-lucide="database"></i>Datasets</a>
+  <div style="border-top:1px solid var(--border);margin:0.5rem 0"></div>
+  <a href="#" onclick="logout()"><i data-lucide="log-out"></i>Logout</a>
+</div>
+</nav>
+
+<main class="container">
+<div class="page-header">
+  <h1>Document Processing Dashboard</h1>
+  <p>Upload gambar dokumen untuk diproses dengan AI atau metode tradisional.</p>
+</div>
+
+<div class="stats" id="statsBar">
+  <div class="stat-card"><div class="label">Device</div><div class="value accent" id="statDevice">Loading...</div></div>
+  <div class="stat-card"><div class="label">Document Restorer</div><div class="value success" id="statRestorer">-</div></div>
+  <div class="stat-card"><div class="label">Shadow Remover</div><div class="value success" id="statShadow">-</div></div>
+  <div class="stat-card"><div class="label">Doc Enhancer</div><div class="value success" id="statEnhancer">-</div></div>
+</div>
+
+<!-- Upload & Process -->
+<div class="card">
+  <h2><i data-lucide="upload-cloud"></i>Upload & Process</h2>
+  <div class="upload-zone" id="uploadZone">
+    <i data-lucide="image-plus"></i>
+    <p>Klik atau drag & drop gambar di sini</p>
+    <div class="hint">PNG, JPG, WEBP, BMP - Maks 20MB</div>
+    <input type="file" id="fileInput" accept="image/*" style="display:none">
+  </div>
+  <div style="margin-top:1.25rem">
+    <div style="font-size:0.8rem;font-weight:600;color:var(--text2);margin-bottom:0.5rem">MODE PROCESSING</div>
+    <div class="mode-grid" id="modeGrid">
+      <button class="mode-btn active" data-mode="restore"><i data-lucide="wand-2"></i>AI Restore</button>
+      <button class="mode-btn" data-mode="shadow_remove"><i data-lucide="sun-dim"></i>Shadow Remove</button>
+      <button class="mode-btn" data-mode="enhance"><i data-lucide="sparkles"></i>AI Enhance</button>
+      <button class="mode-btn" data-mode="magic_enhance"><i data-lucide="magic-wand"></i>Magic Enhance</button>
+      <button class="mode-btn" data-mode="binarize"><i data-lucide="contrast"></i>Binarize</button>
+      <button class="mode-btn" data-mode="cleanup"><i data-lucide="brush-cleaning"></i>Full Cleanup</button>
+      <button class="mode-btn" data-mode="clahe"><i data-lucide="sun"></i>CLAHE Contrast</button>
+      <button class="mode-btn" data-mode="denoise"><i data-lucide="shield-check"></i>Denoise</button>
+      <button class="mode-btn" data-mode="sharpen"><i data-lucide="focus"></i>Sharpen</button>
+      <button class="mode-btn" data-mode="deskew"><i data-lucide="rotate-cw"></i>Deskew</button>
+    </div>
+  </div>
+  <div class="process-bar">
+    <button class="btn btn-primary" id="processBtn" onclick="processImage()" disabled>
+      <i data-lucide="play"></i>Process Image
+    </button>
+    <button class="btn btn-secondary" id="downloadBtn" onclick="downloadResult()" style="display:none">
+      <i data-lucide="download"></i>Download
+    </button>
+    <span id="processInfo" style="color:var(--text2);font-size:0.8rem;margin-left:auto"></span>
+  </div>
+</div>
+
+<div class="results-grid" id="resultsGrid">
+  <div class="result-box">
+    <div class="header"><i data-lucide="image" style="width:14px;height:14px"></i>Original</div>
+    <img id="originalImg" src="" alt="Original" onclick="openLightbox(this.src,'Original')">
+  </div>
+  <div class="result-box">
+    <div class="header" id="resultHeader"><i data-lucide="sparkles" style="width:14px;height:14px"></i>Result</div>
+    <div id="resultContainer">
+      <img id="resultImg" src="" alt="Result" style="display:none" onclick="openLightbox(this.src,'Result')">
+      <div class="spinner-box" id="loadingBox" style="display:none">
+        <div class="spinner"></div>
+        <span>Processing...</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Dataset Browser -->
+<div class="card" style="margin-top:1.5rem">
+  <h2><i data-lucide="folder-open"></i>Dataset Browser</h2>
+  <p style="color:var(--text2);font-size:0.85rem;margin-bottom:1rem">Jelajahi dataset yang tersedia. Klik dataset untuk membuka file manager.</p>
+  <div class="dataset-grid" id="datasetGrid">
+    <div style="color:var(--text3);grid-column:1/-1;text-align:center;padding:2rem">
+      <div class="spinner" style="margin:0 auto"></div>
+    </div>
+  </div>
+</div>
+
+<div class="footer">DocAI v1.0 - Document Restoration AI Platform</div>
+</main>
+
+<!-- File Manager Overlay -->
+<div class="fm-overlay" id="fmOverlay">
+  <div class="fm-panel">
+    <div class="fm-toolbar">
+      <div class="breadcrumb" id="fmBreadcrumb"></div>
+      <div class="fm-view-toggle">
+        <button class="active" onclick="setFmView('grid')" id="fmViewGrid"><i data-lucide="grid-3x3"></i></button>
+        <button onclick="setFmView('list')" id="fmViewList"><i data-lucide="list"></i></button>
+      </div>
+      <span class="info" id="fmInfo"></span>
+      <button class="fm-close" onclick="closeFileManager()"><i data-lucide="x"></i></button>
+    </div>
+    <div class="fm-body" id="fmBody"></div>
+  </div>
+</div>
+
+<!-- Lightbox -->
+<div class="lightbox" id="lightbox">
+  <button class="lightbox-close" onclick="closeLightbox()"><i data-lucide="x"></i></button>
+  <button class="lightbox-nav prev" onclick="navLightbox(-1)"><i data-lucide="chevron-left"></i></button>
+  <button class="lightbox-nav next" onclick="navLightbox(1)"><i data-lucide="chevron-right"></i></button>
+  <img class="lightbox-img" id="lightboxImg" src="" onclick="toggleZoom(event)">
+  <div class="lightbox-info">
+    <span id="lightboxCaption"></span>
+    <span id="lightboxCounter"></span>
+    <div class="zoom-controls">
+      <button onclick="zoomLightbox(-1)">−</button>
+      <button onclick="zoomLightbox(0)" id="zoomLevel">100%</button>
+      <button onclick="zoomLightbox(1)">+</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const token = localStorage.getItem('docai_token');
+const headers = token ? {'Authorization': 'Bearer '+token} : {};
+let selectedFile = null;
+let selectedMode = 'restore';
+let resultBlob = null;
+
+document.getElementById('userDisplay').textContent = localStorage.getItem('docai_user') || 'admin';
+
+function logout(){localStorage.removeItem('docai_token');localStorage.removeItem('docai_user');fetch('/api/auth/logout');window.location.href='/login';}
+function showToast(msg,type='success'){const t=document.getElementById('toast');t.textContent=msg;t.className='toast '+type+' show';setTimeout(()=>t.classList.remove('show'),3000);}
+
+// Load health info
+fetch('/api/health',{headers}).then(r=>r.json()).then(d=>{
+  document.getElementById('statDevice').textContent=d.device||'?';
+  document.getElementById('statRestorer').textContent=d.models?.document_restorer?'Loaded':'Not loaded';
+  document.getElementById('statShadow').textContent=d.models?.shadow_remover?'Loaded':'Not loaded';
+  document.getElementById('statEnhancer').textContent=d.models?.doc_enhancer?'Loaded':'Not loaded';
+}).catch(()=>{});
+
+// Upload zone
+const zone=document.getElementById('uploadZone');
+const fileInput=document.getElementById('fileInput');
+zone.addEventListener('click',()=>fileInput.click());
+zone.addEventListener('dragover',e=>{e.preventDefault();zone.classList.add('dragover')});
+zone.addEventListener('dragleave',()=>zone.classList.remove('dragover'));
+zone.addEventListener('drop',e=>{e.preventDefault();zone.classList.remove('dragover');if(e.dataTransfer.files.length)handleFile(e.dataTransfer.files[0]);});
+fileInput.addEventListener('change',e=>{if(e.target.files.length)handleFile(e.target.files[0]);});
+
+function handleFile(file){
+  selectedFile=file;
+  const reader=new FileReader();
+  reader.onload=e=>{
+    document.getElementById('originalImg').src=e.target.result;
+    document.getElementById('resultsGrid').style.display='grid';
+    document.getElementById('resultImg').style.display='none';
+    document.getElementById('loadingBox').style.display='none';
+    document.getElementById('processBtn').disabled=false;
+    document.getElementById('downloadBtn').style.display='none';
+    document.getElementById('processInfo').textContent=file.name+' ('+Math.round(file.size/1024)+'KB)';
+  };
+  reader.readAsDataURL(file);
+}
+
+document.querySelectorAll('.mode-btn').forEach(btn=>{
+  btn.addEventListener('click',()=>{
+    document.querySelectorAll('.mode-btn').forEach(b=>b.classList.remove('active'));
+    btn.classList.add('active');
+    selectedMode=btn.dataset.mode;
+  });
+});
+
+async function processImage(){
+  if(!selectedFile)return;
+  const btn=document.getElementById('processBtn');
+  const resultImg=document.getElementById('resultImg');
+  const loadingBox=document.getElementById('loadingBox');
+  btn.disabled=true;
+  btn.innerHTML='<div class="spinner" style="width:16px;height:16px;border-width:2px;margin:0"></div>Processing...';
+  resultImg.style.display='none';
+  loadingBox.style.display='flex';
+  document.getElementById('resultHeader').innerHTML='<i data-lucide="sparkles" style="width:14px;height:14px"></i>Result - '+selectedMode;
+  lucide.createIcons();
+  const fd=new FormData();
+  fd.append('file',selectedFile);
+  fd.append('mode',selectedMode);
+  const start=performance.now();
+  try{
+    const res=await fetch('/api/scan',{method:'POST',headers,body:fd});
+    if(!res.ok){const err=await res.json().catch(()=>({}));throw new Error(err.detail||'Processing failed');}
+    resultBlob=await res.blob();
+    const url=URL.createObjectURL(resultBlob);
+    resultImg.src=url;
+    resultImg.style.display='block';
+    loadingBox.style.display='none';
+    const ms=Math.round(performance.now()-start);
+    document.getElementById('processInfo').textContent=selectedMode+' completed in '+ms+'ms';
+    document.getElementById('downloadBtn').style.display='inline-flex';
+    showToast('Processing selesai! ('+ms+'ms)');
+  }catch(e){
+    loadingBox.style.display='none';
+    showToast(e.message,'error');
+    document.getElementById('processInfo').textContent='Error: '+e.message;
+  }finally{
+    btn.disabled=false;
+    btn.innerHTML='<i data-lucide="play"></i>Process Image';
+    lucide.createIcons();
+  }
+}
+
+function downloadResult(){
+  if(!resultBlob)return;
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(resultBlob);
+  a.download='docai_'+selectedMode+'_'+Date.now()+'.png';
+  a.click();
+}
+
+// ========== DATASET BROWSER ==========
+let allDatasets = [];
+
+async function loadDatasets(){
+  try{
+    const res=await fetch('/api/datasets',{headers});
+    const data=await res.json();
+    allDatasets=data.datasets||[];
+    renderDatasetCards();
+  }catch(e){
+    document.getElementById('datasetGrid').innerHTML='<div style="color:var(--text3);grid-column:1/-1;text-align:center;padding:2rem">Gagal memuat dataset</div>';
+  }
+}
+
+function renderDatasetCards(){
+  const grid=document.getElementById('datasetGrid');
+  if(!allDatasets.length){
+    grid.innerHTML='<div style="color:var(--text3);grid-column:1/-1;text-align:center;padding:2rem"><i data-lucide="folder-x" style="width:32px;height:32px;margin-bottom:0.5rem;display:block;margin:0 auto 0.5rem"></i>Tidak ada dataset ditemukan</div>';
+    lucide.createIcons();
+    return;
+  }
+  grid.innerHTML=allDatasets.map(ds=>{
+    const isPaired=ds.kind==='paired';
+    const count=isPaired?(ds.pair_count||0)+' pairs':(ds.image_count||0)+' images';
+    const detail=isPaired?(ds.has_train_test?'Train + Test':'Train only'):(ds.note||'Clean dataset');
+    return `<div class="dataset-card" onclick="openFileManager('${ds.path}')">
+      <div class="name"><i data-lucide="${isPaired?'layers':'image'}"></i>${ds.name}<span class="badge ${isPaired?'badge-paired':'badge-clean'}">${ds.kind}</span></div>
+      <div class="meta">
+        <span><i data-lucide="file"></i>${count}</span>
+        <span><i data-lucide="info"></i>${detail}</span>
+      </div>
+    </div>`;
+  }).join('');
+  lucide.createIcons();
+}
+
+// ========== FILE MANAGER ==========
+let fmDataset='';
+let fmPath='';
+let fmEntries=[];
+let fmView='grid';
+let fmImages=[];
+let fmCurrentIdx=0;
+
+function openFileManager(dataset){
+  fmDataset=dataset;
+  fmPath='';
+  document.getElementById('fmOverlay').classList.add('open');
+  document.body.style.overflow='hidden';
+  browsePath('');
+}
+
+function closeFileManager(){
+  document.getElementById('fmOverlay').classList.remove('open');
+  document.body.style.overflow='';
+}
+
+async function browsePath(path){
+  const body=document.getElementById('fmBody');
+  body.innerHTML='<div class="fm-loading"><div class="spinner"></div>Memuat...</div>';
+  try{
+    const res=await fetch(`/api/datasets/explorer?dataset=${encodeURIComponent(fmDataset)}&path=${encodeURIComponent(path)}&limit=120`,{headers});
+    if(!res.ok)throw new Error('Failed');
+    const data=await res.json();
+    fmPath=data.path||'';
+    fmEntries=data.entries||[];
+    renderBreadcrumb();
+    renderFmEntries();
+    document.getElementById('fmInfo').textContent=data.total+' items';
+  }catch(e){
+    body.innerHTML='<div class="fm-empty"><i data-lucide="alert-triangle"></i><span>Gagal memuat folder</span></div>';
+    lucide.createIcons();
+  }
+}
+
+function renderBreadcrumb(){
+  const bc=document.getElementById('fmBreadcrumb');
+  const parts=fmPath?fmPath.split('/').filter(Boolean):[];
+  let html=`<button onclick="browsePath('')">${fmDataset}</button>`;
+  let accumulated='';
+  for(const part of parts){
+    accumulated+=(accumulated?'/':'')+part;
+    const p=accumulated;
+    html+=`<span>/</span><button onclick="browsePath('${p}')">${part}</button>`;
+  }
+  bc.innerHTML=html;
+}
+
+function renderFmEntries(){
+  const body=document.getElementById('fmBody');
+  if(!fmEntries.length){
+    body.innerHTML='<div class="fm-empty"><i data-lucide="folder-open"></i><span>Folder kosong</span></div>';
+    lucide.createIcons();
+    return;
+  }
+  fmImages=fmEntries.filter(e=>e.kind==='image');
+  const folders=fmEntries.filter(e=>e.kind==='folder');
+  const images=fmEntries.filter(e=>e.kind==='image');
+
+  if(fmView==='grid'){
+    let html='<div class="fm-grid">';
+    for(const f of folders){
+      html+=`<div class="fm-item folder" onclick="browsePath('${f.path}')"><i data-lucide="folder"></i><div class="name">${f.name}</div></div>`;
+    }
+    for(let i=0;i<images.length;i++){
+      const img=images[i];
+      const url=`/api/datasets/explorer/image?dataset=${encodeURIComponent(fmDataset)}&path=${encodeURIComponent(img.path)}`;
+      const size=img.size?(img.size>1048576?(img.size/1048576).toFixed(1)+' MB':(img.size/1024).toFixed(0)+' KB'):'';
+      html+=`<div class="fm-item image" onclick="openImageLightbox(${i})">
+        <img class="thumb" src="${url}" loading="lazy" alt="${img.name}">
+        <div class="info"><span class="fname">${img.name}</span><span>${size}</span></div>
+      </div>`;
+    }
+    html+='</div>';
+    body.innerHTML=html;
+  }else{
+    let html='<div class="fm-list">';
+    for(const f of folders){
+      html+=`<div class="fm-item" onclick="browsePath('${f.path}')"><i data-lucide="folder" class="folder-icon"></i><div class="name">${f.name}</div><div class="size">Folder</div></div>`;
+    }
+    for(let i=0;i<images.length;i++){
+      const img=images[i];
+      const url=`/api/datasets/explorer/image?dataset=${encodeURIComponent(fmDataset)}&path=${encodeURIComponent(img.path)}`;
+      const size=img.size?(img.size>1048576?(img.size/1048576).toFixed(1)+' MB':(img.size/1024).toFixed(0)+' KB'):'';
+      html+=`<div class="fm-item" onclick="openImageLightbox(${i})">
+        <img class="thumb-sm" src="${url}" loading="lazy" alt="${img.name}">
+        <div class="name">${img.name}</div>
+        <div class="size">${size}</div>
+      </div>`;
+    }
+    html+='</div>';
+    body.innerHTML=html;
+  }
+  lucide.createIcons();
+}
+
+function setFmView(v){
+  fmView=v;
+  document.getElementById('fmViewGrid').classList.toggle('active',v==='grid');
+  document.getElementById('fmViewList').classList.toggle('active',v==='list');
+  renderFmEntries();
+}
+
+// ========== LIGHTBOX / ZOOM ==========
+let lightboxImages=[];
+let lightboxIdx=0;
+let lightboxZoom=1;
+
+function openImageLightbox(idx){
+  lightboxImages=fmImages.map(img=>({
+    src:`/api/datasets/explorer/image?dataset=${encodeURIComponent(fmDataset)}&path=${encodeURIComponent(img.path)}`,
+    name:img.name
+  }));
+  lightboxIdx=idx;
+  lightboxZoom=1;
+  showLightboxImage();
+  document.getElementById('lightbox').classList.add('open');
+  document.body.style.overflow='hidden';
+}
+
+function openLightbox(src,caption){
+  lightboxImages=[{src,caption}];
+  lightboxIdx=0;
+  lightboxZoom=1;
+  showLightboxImage();
+  document.getElementById('lightbox').classList.add('open');
+  document.body.style.overflow='hidden';
+}
+
+function closeLightbox(){
+  document.getElementById('lightbox').classList.remove('open');
+  document.body.style.overflow='';
+  lightboxZoom=1;
+}
+
+function showLightboxImage(){
+  const img=lightboxImages[lightboxIdx];
+  const el=document.getElementById('lightboxImg');
+  el.src=img.src;
+  el.style.transform='scale(1)';
+  lightboxZoom=1;
+  document.getElementById('zoomLevel').textContent='100%';
+  document.getElementById('lightboxCaption').textContent=img.name||img.caption||'';
+  document.getElementById('lightboxCounter').textContent=lightboxImages.length>1?(lightboxIdx+1)+' / '+lightboxImages.length:'';
+  document.querySelector('.lightbox-nav.prev').style.display=lightboxImages.length>1?'':'none';
+  document.querySelector('.lightbox-nav.next').style.display=lightboxImages.length>1?'':'none';
+}
+
+function navLightbox(dir){
+  lightboxIdx=(lightboxIdx+dir+lightboxImages.length)%lightboxImages.length;
+  showLightboxImage();
+}
+
+function toggleZoom(e){
+  e.stopPropagation();
+  if(lightboxZoom===1){lightboxZoom=2;}else{lightboxZoom=1;}
+  document.getElementById('lightboxImg').style.transform='scale('+lightboxZoom+')';
+  document.getElementById('zoomLevel').textContent=Math.round(lightboxZoom*100)+'%';
+}
+
+function zoomLightbox(dir){
+  if(dir===0){lightboxZoom=lightboxZoom===1?2:1;}
+  else if(dir>0){lightboxZoom=Math.min(lightboxZoom+0.5,5);}
+  else{lightboxZoom=Math.max(lightboxZoom-0.5,0.5);}
+  document.getElementById('lightboxImg').style.transform='scale('+lightboxZoom+')';
+  document.getElementById('zoomLevel').textContent=Math.round(lightboxZoom*100)+'%';
+}
+
+// Keyboard shortcuts
+document.addEventListener('keydown',e=>{
+  if(document.getElementById('lightbox').classList.contains('open')){
+    if(e.key==='Escape')closeLightbox();
+    if(e.key==='ArrowLeft')navLightbox(-1);
+    if(e.key==='ArrowRight')navLightbox(1);
+    if(e.key==='+'||e.key==='=')zoomLightbox(1);
+    if(e.key==='-')zoomLightbox(-1);
+    if(e.key==='0')zoomLightbox(0);
+  }
+  if(document.getElementById('fmOverlay').classList.contains('open')){
+    if(e.key==='Escape')closeFileManager();
+  }
+});
+
+// Mouse wheel zoom in lightbox
+document.getElementById('lightboxImg').addEventListener('wheel',e=>{
+  e.preventDefault();
+  zoomLightbox(e.deltaY<0?1:-1);
+});
+
+// Init
+loadDatasets();
+lucide.createIcons();
+</script>
+</body>
+</html>

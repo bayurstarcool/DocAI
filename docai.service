@@ -1,0 +1,17 @@
+[Unit]
+Description=DocAI - Document Processing AI Platform
+After=network.target
+
+[Service]
+Type=forking
+User=wahyu
+Group=wahyu
+WorkingDirectory=/home/wahyu/docai
+Environment=PYTHONPATH=/home/wahyu/docai
+ExecStart=/usr/bin/screen -dmS docai bash -c "cd /home/wahyu/docai && PYTHONPATH=/home/wahyu/docai python3 -c \"from backend.app import app; import uvicorn; uvicorn.run(app, host='0.0.0.0', port=8000, log_level='info')\""
+ExecStop=/usr/bin/screen -S docai -X quit
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
