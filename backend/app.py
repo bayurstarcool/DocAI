@@ -3,6 +3,7 @@ DocAI - Full-Featured Web Application
 FastAPI backend for document restoration AI with multiple processing modes.
 """
 import io
+import json
 import os
 import signal
 import shutil
@@ -24,7 +25,7 @@ from PIL import Image
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from backend.utils.image_utils import run_tiled_restoration
+from backend.utils.image_utils import run_document_restoration_pipeline, run_tiled_restoration
 from backend.models.document_restorer import DocumentRestorerNet
 from backend.auth import ADMIN_CREDENTIALS, create_token, is_authenticated
 from backend.workspace import WorkspaceError, resolve_workspace_path, safe_workspace_name
@@ -78,7 +79,8 @@ def _load_checkpoint(model_cls, checkpoint_path, map_location, **kwargs):
         model = model_cls(**kwargs)
         checkpoint = torch.load(checkpoint_path, map_location=map_location)
         state_dict = checkpoint.get('model', checkpoint.get('model_state_dict', checkpoint))
-        missing, unexpected = model.load_state_dict(state_dict, strict=False)
+        strict = model_cls is DocumentRestorerNet
+        missing, unexpected = model.load_state_dict(state_dict, strict=strict)
         if missing:
             print(f"  [INFO] Missing keys (initialized randomly): {len(missing)}")
         if unexpected:
@@ -93,6 +95,7 @@ def _load_checkpoint(model_cls, checkpoint_path, map_location, **kwargs):
 
 
 doc_restorer_model = _load_checkpoint(DocumentRestorerNet, MODEL_CHECKPOINT_PATH, device)
+doc_restorer_checkpoint = str(MODEL_CHECKPOINT_PATH.relative_to(BASE_DIR)) if doc_restorer_model is not None else None
 shadow_remover_model = _load_checkpoint(ShadowRemoverNet, CHECKPOINT_DIR / 'shadow_remover' / 'best.pth', device)
 doc_enhancer_model = _load_checkpoint(DocEnhancerNet, CHECKPOINT_DIR / 'doc_enhancer' / 'best.pth', device)
 
@@ -197,6 +200,20 @@ def _validate_training_params(epochs: int, batch_size: int, size: int, lr: float
         raise HTTPException(status_code=400, detail="base_channels must be between 8 and 256")
     if not 0 <= workers <= 16:
         raise HTTPException(status_code=400, detail="workers must be between 0 and 16")
+
+
+def _validate_loss_weights(**weights: float):
+    for name, value in weights.items():
+        if value < 0 or value > 10:
+            raise HTTPException(status_code=400, detail=f"{name} must be between 0 and 10")
+
+def _validate_training_controls(early_stop_patience: int, min_delta: float, grad_clip_norm: float):
+    if not 0 <= early_stop_patience <= 1000:
+        raise HTTPException(status_code=400, detail="early_stop_patience must be between 0 and 1000")
+    if min_delta < 0 or min_delta > 1:
+        raise HTTPException(status_code=400, detail="min_delta must be between 0 and 1")
+    if grad_clip_norm < 0 or grad_clip_norm > 100:
+        raise HTTPException(status_code=400, detail="grad_clip_norm must be between 0 and 100")
 
 
 def _pil_to_response(img: Image.Image, filename: str = "result.png"):
@@ -356,17 +373,30 @@ async def system_status(request: Request):
                 free, total = torch.cuda.mem_get_info(index)
                 used = total - free
                 runtime = smi_stats.get(index, {})
+                used_mb = runtime.get('memory_used_mb')
+                total_mb = runtime.get('memory_total_mb')
+                free_mb = runtime.get('memory_free_mb')
+                if used_mb is None:
+                    used_mb = used / (1024 ** 2)
+                if total_mb is None:
+                    total_mb = total / (1024 ** 2)
+                if free_mb is None:
+                    free_mb = free / (1024 ** 2)
                 status['gpu']['items'].append({
                     'index': index,
                     'name': torch.cuda.get_device_name(index),
-                    'vram_total_gb': round(total / 1e9, 2),
-                    'vram_used_gb': round(used / 1e9, 2),
-                    'vram_free_gb': round(free / 1e9, 2),
-                    'vram_percent': round((used / total) * 100, 2) if total else 0,
+                    'vram_total_mb': round(total_mb),
+                    'vram_used_mb': round(used_mb),
+                    'vram_free_mb': round(free_mb),
+                    'vram_total_gb': round(total_mb / 1024, 2),
+                    'vram_used_gb': round(used_mb / 1024, 2),
+                    'vram_free_gb': round(free_mb / 1024, 2),
+                    'vram_percent': round((used_mb / total_mb) * 100, 2) if total_mb else 0,
                     'utilization_percent': runtime.get('utilization_percent'),
                     'temperature_c': runtime.get('temperature_c'),
                     'power_draw_w': runtime.get('power_draw_w'),
                     'power_limit_w': runtime.get('power_limit_w'),
+                    'stats_source': runtime.get('source', 'torch'),
                 })
         return status
     except Exception as error:
@@ -384,7 +414,7 @@ async def scan_document(request: Request, file: UploadFile = File(...), mode: st
     if mode == "restore" and doc_restorer_model is not None:
         start = time.time()
         with torch.inference_mode():
-            restored, mask = run_tiled_restoration(
+            restored, mask, info = run_document_restoration_pipeline(
                 doc_restorer_model, image, device,
                 tile_size=RESTORATION_TILE_SIZE, overlap=RESTORATION_TILE_OVERLAP,
             )
@@ -472,14 +502,18 @@ async def scan_document_json(request: Request, file: UploadFile = File(...), mod
 
     if mode == "restore" and doc_restorer_model is not None:
         with torch.inference_mode():
-            restored, mask = run_tiled_restoration(doc_restorer_model, image, device,
-                                                   tile_size=RESTORATION_TILE_SIZE, overlap=RESTORATION_TILE_OVERLAP)
+            restored, mask, info = run_document_restoration_pipeline(
+                doc_restorer_model, image, device,
+                tile_size=RESTORATION_TILE_SIZE, overlap=RESTORATION_TILE_OVERLAP,
+            )
         elapsed = round((time.time() - start) * 1000, 1)
         uid = uuid.uuid4().hex[:8]
         out_path = UPLOAD_DIR / f"scan_{uid}.png"
         restored.save(str(out_path))
         return {"success": True, "mode": mode, "time_ms": elapsed,
-                "size": list(restored.size), "url": f"/api/uploads/{out_path.name}"}
+                "size": list(restored.size), "url": f"/api/uploads/{out_path.name}",
+                "pipeline": info['pipeline'], "mask_mean": info['mask_mean'],
+                "illumination_mean": info['illumination_mean']}
 
     # For non-restore modes, fall back to regular scan
     return await scan_document(request, file, mode)
@@ -559,8 +593,10 @@ async def batch_process(request: Request,
             start = time.time()
             if mode == "restore" and doc_restorer_model is not None:
                 with torch.inference_mode():
-                    out, _ = run_tiled_restoration(doc_restorer_model, image, device,
-                                                   tile_size=RESTORATION_TILE_SIZE, overlap=RESTORATION_TILE_OVERLAP)
+                    out, _, _ = run_document_restoration_pipeline(
+                        doc_restorer_model, image, device,
+                        tile_size=RESTORATION_TILE_SIZE, overlap=RESTORATION_TILE_OVERLAP,
+                    )
             elif mode == "magic_enhance":
                 out = _np_to_pil(magic_document_enhance(np.array(image)))
             elif mode == "binarize":
@@ -607,6 +643,43 @@ async def list_image_tests(request: Request):
             tests.append({'name': path.name, 'image_count': image_count})
     return {'tests': tests}
 
+
+@app.get("/api/image-tests/contact-sheet-analysis")
+async def contact_sheet_analysis(request: Request):
+    require_api_auth(request)
+    candidates = [
+        IMAGE_TEST_ROOT / 'contact_sheet_analysis_latest2.png',
+        IMAGE_TEST_ROOT / 'contact_sheet_analysis_light.png',
+        IMAGE_TEST_ROOT / 'contact_sheet_analysis.png',
+    ]
+    file_path = next((path for path in candidates if path.is_file()), IMAGE_TEST_ROOT / 'contact_sheet_analysis.png')
+    if not file_path.is_file():
+        raise HTTPException(status_code=404, detail='Contact sheet analysis not found')
+    return FileResponse(file_path)
+
+@app.get("/api/image-tests/contact-sheets")
+async def list_contact_sheets(request: Request):
+    require_api_auth(request)
+    IMAGE_TEST_ROOT.mkdir(parents=True, exist_ok=True)
+    sheets = []
+    for path in sorted(IMAGE_TEST_ROOT.glob('contact_sheet*'), key=lambda value: value.stat().st_mtime, reverse=True):
+        if path.is_file() and path.suffix.lower() in IMAGE_EXTENSIONS:
+            sheets.append({
+                'name': path.name,
+                'path': f'data/test/{path.name}',
+                'size': path.stat().st_size,
+                'url': f'/api/image-tests/contact-sheets/{path.name}',
+            })
+    return {'sheets': sheets}
+
+@app.get("/api/image-tests/contact-sheets/{name}")
+async def preview_contact_sheet(request: Request, name: str):
+    require_api_auth(request)
+    safe_name = Path(name).name
+    file_path = IMAGE_TEST_ROOT / safe_name
+    if not file_path.is_file() or not safe_name.startswith('contact_sheet') or file_path.suffix.lower() not in IMAGE_EXTENSIONS:
+        raise HTTPException(status_code=404, detail='Contact sheet not found')
+    return FileResponse(file_path)
 
 @app.get("/api/image-tests/files")
 async def list_image_test_files(request: Request, test: str, path: str = ''):
@@ -662,6 +735,54 @@ async def upload_image_test(request: Request, test: str = Form(...), destination
         shutil.copyfileobj(file.file, output)
     return {'success': True, 'path': target_path.relative_to(test_root).as_posix()}
 
+@app.post("/api/image-tests/upload-pair")
+async def upload_image_test_pair(request: Request,
+                                 test: str = Form(...),
+                                 input_file: UploadFile = File(...),
+                                 output_file: UploadFile = File(...)):
+    require_api_auth(request)
+    clean_name = (test or '').strip() or f"{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}"
+    test_root = IMAGE_TEST_ROOT / safe_workspace_name(clean_name)
+    input_dir = test_root / 'input'
+    output_dir = test_root / 'output'
+    input_dir.mkdir(parents=True, exist_ok=True)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    saved = {}
+    for destination, upload, target_dir in (
+        ('input', input_file, input_dir),
+        ('output', output_file, output_dir),
+    ):
+        _validate_image_upload(upload)
+        upload.file.seek(0)
+        filename = Path(upload.filename or f'{destination}.png').name
+        target_path = target_dir / filename
+        with target_path.open('wb') as output:
+            shutil.copyfileobj(upload.file, output)
+        saved[destination] = target_path.relative_to(test_root).as_posix()
+
+    return {'success': True, 'test': test_root.name, 'paths': saved}
+
+@app.delete("/api/image-tests/item")
+async def delete_image_test_item(request: Request, test: str, path: str = ''):
+    require_api_auth(request)
+    try:
+        test_root = IMAGE_TEST_ROOT / safe_workspace_name(test)
+        target_path = resolve_workspace_path(test_root, path or '.')
+    except WorkspaceError as error:
+        raise HTTPException(status_code=400, detail=str(error))
+    if target_path == test_root:
+        shutil.rmtree(target_path, ignore_errors=True)
+        return {'success': True, 'deleted': test_root.name, 'test_deleted': True}
+    if not target_path.exists():
+        raise HTTPException(status_code=404, detail='File or folder not found')
+    relative = target_path.relative_to(test_root).as_posix()
+    if target_path.is_dir():
+        shutil.rmtree(target_path)
+    else:
+        target_path.unlink()
+    return {'success': True, 'deleted': relative, 'test_deleted': False}
+
 
 # =====================================================================
 #  DATASET MANAGEMENT
@@ -694,7 +815,11 @@ async def stop_dataset_download(request: Request):
 @app.get("/api/training/status")
 async def training_status(request: Request):
     require_api_auth(request)
-    history_file = CHECKPOINT_DIR / 'document_restorer' / 'training_history.json'
+    running = _training_is_running()
+    meta = _stored_training_meta()
+    active_output = meta.get('run_output')
+    active_output_path = (BASE_DIR / active_output).resolve() if active_output else CHECKPOINT_DIR / 'document_restorer'
+    history_file = active_output_path / 'training_history.json'
     history = {}
     if history_file.exists():
         try:
@@ -704,7 +829,7 @@ async def training_status(request: Request):
             pass
     best_path = CHECKPOINT_DIR / 'document_restorer' / 'best.pth'
     last_path = CHECKPOINT_DIR / 'document_restorer' / 'last.pth'
-    preview_dir = CHECKPOINT_DIR / 'document_restorer' / 'previews'
+    preview_dir = active_output_path / 'previews'
     latest_preview = None
     if preview_dir.exists():
         previews = sorted(preview_dir.glob('epoch_*.png'), key=lambda path: path.stat().st_mtime, reverse=True)
@@ -715,6 +840,8 @@ async def training_status(request: Request):
     eta = None
     current_epoch = None
     total_epochs = None
+    current_batch = None
+    total_batches = None
     last_train_loss = None
     last_val_loss = None
     last_val_psnr = None
@@ -730,6 +857,10 @@ async def training_status(request: Request):
             if m:
                 current_epoch = int(m.group(1))
                 total_epochs = int(m.group(2))
+            m = _re.search(r'batch=(\d+)/(\d+)', line)
+            if m:
+                current_batch = int(m.group(1))
+                total_batches = int(m.group(2))
             m = _re.search(r'train_loss=(\S+)', line)
             if m:
                 last_train_loss = m.group(1)
@@ -749,23 +880,28 @@ async def training_status(request: Request):
     if model_available:
         model_mtime = int(best_path.stat().st_mtime)
 
-    running = _training_process is not None and _training_process.poll() is None
-    started_at = _training_started_at
+    started_at = _training_started_at or meta.get('started_at')
     if running and started_at is None:
         try:
             started_at = psutil.Process(_training_process.pid).create_time()
         except Exception:
             started_at = None
     eta_seconds = _eta_to_seconds(eta)
-    estimated_finish_at = time.time() + eta_seconds if running and eta_seconds is not None else None
+    estimated_finish_at = time.time() + eta_seconds if running and eta_seconds is not None else (_training_estimated_finish_at or meta.get('estimated_finish_at') if running else None)
+    progress_percent = None
+    if current_epoch is not None and total_epochs:
+        completed_epochs = max(current_epoch - 1, 0)
+        batch_fraction = (current_batch / total_batches) if current_batch is not None and total_batches else 0
+        progress_percent = round(((completed_epochs + batch_fraction) / total_epochs) * 100, 2)
 
     return {
         'running': running,
-        'process_kind': _training_kind,
+        'process_kind': _training_kind or meta.get('kind'),
         'started_at': started_at,
         'started_at_wib': _format_wib(started_at),
         'estimated_finish_at': estimated_finish_at,
         'estimated_finish_wib': _format_wib(estimated_finish_at),
+        'run_command': meta.get('cmd'),
         'has_history': bool(history),
         'epochs': len(history.get('train_loss', [])),
         'best_loss': min(history.get('val_loss', [float('inf')])),
@@ -775,23 +911,53 @@ async def training_status(request: Request):
         'eta': eta,
         'current_epoch': current_epoch,
         'total_epochs': total_epochs,
+        'current_batch': current_batch,
+        'total_batches': total_batches,
+        'progress_percent': progress_percent,
         'last_train_loss': last_train_loss,
         'last_val_loss': last_val_loss,
         'last_val_psnr': last_val_psnr,
         'last_val_ssim': last_val_ssim,
         'model_available_for_test': model_available,
         'model_mtime': model_mtime,
-        'latest_preview_url': f'/api/training/preview/{latest_preview}' if latest_preview else None,
+        'active_run_id': meta.get('run_id'),
+        'active_run_output': active_output,
+        'latest_preview_url': f'/api/training/preview/{latest_preview}?run_id={meta.get("run_id", "")}&v={int((preview_dir / latest_preview).stat().st_mtime)}' if latest_preview else None,
     }
 
 
 @app.get("/api/training/preview/{filename}")
-async def training_preview(request: Request, filename: str):
+async def training_preview(request: Request, filename: str, run_id: str = ''):
     require_api_auth(request)
-    preview_path = CHECKPOINT_DIR / 'document_restorer' / 'previews' / Path(filename).name
+    preview_root = CHECKPOINT_DIR / 'document_restorer' / 'runs' / Path(run_id).name if run_id else CHECKPOINT_DIR / 'document_restorer'
+    preview_path = preview_root / 'previews' / Path(filename).name
     if not preview_path.exists() or preview_path.suffix.lower() != '.png':
         raise HTTPException(status_code=404, detail='Preview not found')
     return FileResponse(preview_path, media_type='image/png')
+
+@app.get("/api/training/runs")
+async def training_runs(request: Request):
+    require_api_auth(request)
+    runs_root = CHECKPOINT_DIR / 'document_restorer' / 'runs'
+    runs = []
+    if runs_root.exists():
+        for run_dir in sorted((path for path in runs_root.iterdir() if path.is_dir()), reverse=True):
+            manifest = {}
+            manifest_path = run_dir / 'run_manifest.json'
+            if manifest_path.exists():
+                try:
+                    manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
+                except Exception:
+                    pass
+            if manifest.get('status') == 'running' and run_dir.name != _stored_training_meta().get('run_id'):
+                manifest['status'] = 'interrupted'
+            checkpoints = []
+            for name in ('best.pth', 'best_loss.pth', 'best_psnr.pth', 'best_ssim.pth', 'last.pth'):
+                checkpoint_path = run_dir / name
+                if checkpoint_path.exists():
+                    checkpoints.append({'name': name, 'path': checkpoint_path.relative_to(BASE_DIR).as_posix(), 'mtime': int(checkpoint_path.stat().st_mtime)})
+            runs.append({**manifest, 'run_id': run_dir.name, 'checkpoints': checkpoints})
+    return {'runs': runs}
 
 @app.get("/api/training/evaluation/status")
 async def evaluation_status(request: Request, output: str = 'evaluation/document_restorer'):
@@ -849,6 +1015,14 @@ async def list_datasets(request: Request):
     ]
 
     all_datasets = []
+    seen_dataset_paths = set()
+
+    def add_dataset(info: dict):
+        path = info.get('path')
+        if path in seen_dataset_paths:
+            return
+        seen_dataset_paths.add(path)
+        all_datasets.append(info)
     for search_dir in search_dirs:
         if not search_dir.exists():
             continue
@@ -858,7 +1032,7 @@ async def list_datasets(request: Request):
             for d in sorted(clean_root.iterdir()):
                 if d.is_dir():
                     imgs = [f for f in d.rglob('*') if f.is_file() and f.suffix.lower() in {'.png','.jpg','.jpeg','.bmp','.tif','.tiff','.webp'}]
-                    all_datasets.append({
+                    add_dataset({
                         'name': d.name,
                         'kind': 'clean',
                         'path': str(d.relative_to(BASE_DIR)),
@@ -873,15 +1047,72 @@ async def list_datasets(request: Request):
                 if d.is_dir():
                     info = _scan_paired_dataset(d)
                     info['source'] = str(search_dir.relative_to(BASE_DIR))
-                    all_datasets.append(info)
-        # Direct dataset folders (e.g. Document_Enhancement/train)
+                    add_dataset(info)
+        # Identity datasets
+        identity_root = search_dir / 'identity'
+        if identity_root.exists():
+            direct_imgs = [f for f in identity_root.iterdir() if f.is_file() and f.suffix.lower() in {'.png','.jpg','.jpeg','.bmp','.tif','.tiff','.webp'}]
+            if direct_imgs:
+                add_dataset({
+                    'name': identity_root.name,
+                    'kind': 'identity',
+                    'path': str(identity_root.relative_to(BASE_DIR)),
+                    'abs_path': str(identity_root),
+                    'image_count': len(direct_imgs),
+                    'source': str(search_dir.relative_to(BASE_DIR)),
+                    'ready': True,
+                    'note': 'Identity input=target preservation dataset',
+                })
+            for d in sorted(path for path in identity_root.iterdir() if path.is_dir()):
+                imgs = [f for f in d.rglob('*') if f.is_file() and f.suffix.lower() in {'.png','.jpg','.jpeg','.bmp','.tif','.tiff','.webp'}]
+                add_dataset({
+                    'name': d.name,
+                    'kind': 'identity',
+                    'path': str(d.relative_to(BASE_DIR)),
+                    'abs_path': str(d),
+                    'image_count': len(imgs),
+                    'source': str(search_dir.relative_to(BASE_DIR)),
+                    'ready': len(imgs) > 0,
+                    'note': 'Identity input=target preservation dataset',
+                })
+        data_identity_root = BASE_DIR / 'data' / 'identity'
+        if search_dir == BASE_DIR / 'datasets' and data_identity_root.exists():
+            direct_imgs = [f for f in data_identity_root.iterdir() if f.is_file() and f.suffix.lower() in {'.png','.jpg','.jpeg','.bmp','.tif','.tiff','.webp'}]
+            if direct_imgs:
+                add_dataset({
+                    'name': data_identity_root.name,
+                    'kind': 'identity',
+                    'path': str(data_identity_root.relative_to(BASE_DIR)),
+                    'abs_path': str(data_identity_root),
+                    'image_count': len(direct_imgs),
+                    'source': 'data',
+                    'ready': True,
+                    'note': 'Identity input=target preservation dataset',
+                })
+            for d in sorted(path for path in data_identity_root.iterdir() if path.is_dir()):
+                imgs = [f for f in d.rglob('*') if f.is_file() and f.suffix.lower() in {'.png','.jpg','.jpeg','.bmp','.tif','.tiff','.webp'}]
+                add_dataset({
+                    'name': d.name,
+                    'kind': 'identity',
+                    'path': str(d.relative_to(BASE_DIR)),
+                    'abs_path': str(d),
+                    'image_count': len(imgs),
+                    'source': 'data',
+                    'ready': len(imgs) > 0,
+                    'note': 'Identity input=target preservation dataset',
+                })
+        # Direct dataset folders (e.g. ShadowDocument7K or Document_Enhancement/train)
         for d in sorted(search_dir.iterdir()):
             if d.is_dir() and d.name not in {'clean', 'paired', 'test_download'}:
-                if (d / 'train').is_dir():
-                    # Check if it's a clean dataset folder
+                if (d / 'train' / 'input').is_dir() and (d / 'train' / 'target').is_dir():
+                    info = _scan_paired_dataset(d)
+                    info['source'] = str(search_dir.relative_to(BASE_DIR))
+                    add_dataset(info)
+                elif (d / 'train').is_dir():
+                    # Clean dataset folder with images under train/.
                     train_dir = d / 'train'
                     imgs = [f for f in train_dir.rglob('*') if f.is_file() and f.suffix.lower() in {'.png','.jpg','.jpeg','.bmp','.tif','.tiff','.webp'}]
-                    all_datasets.append({
+                    add_dataset({
                         'name': d.name,
                         'kind': 'clean',
                         'path': str(d.relative_to(BASE_DIR)),
@@ -1028,9 +1259,12 @@ async def validate_dataset(request: Request, path: str):
 async def reload_model(request: Request):
     """Reload best.pth from disk — allows testing model while training continues."""
     require_api_auth(request)
-    global doc_restorer_model
+    global doc_restorer_model, doc_restorer_checkpoint
 
-    target_path = CHECKPOINT_DIR / 'document_restorer' / 'best.pth'
+    payload = await request.json() if request.headers.get('content-type', '').startswith('application/json') else {}
+    checkpoint_value = payload.get('checkpoint', 'checkpoints/document_restorer/best.pth')
+    safe_checkpoint = _safe_checkpoint_path(checkpoint_value)
+    target_path = BASE_DIR / safe_checkpoint
     if not target_path.exists():
         raise HTTPException(status_code=404, detail='Model checkpoint not found')
 
@@ -1039,10 +1273,12 @@ async def reload_model(request: Request):
         if new_model is None:
             raise HTTPException(status_code=500, detail='Failed to load model')
         doc_restorer_model = new_model
+        doc_restorer_checkpoint = safe_checkpoint
         mtime = int(target_path.stat().st_mtime)
         return {
             'success': True,
-            'message': 'Model reloaded from best.pth',
+            'message': f'Model reloaded from {safe_checkpoint}',
+            'checkpoint': safe_checkpoint,
             'model_mtime': mtime,
         }
     except Exception as e:
@@ -1057,6 +1293,7 @@ async def model_status(request: Request):
         'loaded': doc_restorer_model is not None,
         'checkpoint_exists': best_path.exists(),
         'checkpoint_mtime': int(best_path.stat().st_mtime) if best_path.exists() else None,
+        'loaded_checkpoint': doc_restorer_checkpoint,
     }
 
 # =====================================================================
@@ -1069,8 +1306,11 @@ _training_process = None
 _training_log = []
 _training_lock = threading.Lock()
 _training_started_at = None
+_training_estimated_finish_at = None
 _training_kind = None
 TRAINING_LOG_PATH = CHECKPOINT_DIR / 'document_restorer' / 'run.log'
+TRAINING_PID_PATH = CHECKPOINT_DIR / 'document_restorer' / 'run.pid'
+TRAINING_META_PATH = CHECKPOINT_DIR / 'document_restorer' / 'run_meta.json'
 WIB = timezone(timedelta(hours=7))
 
 def _format_wib(timestamp: float | None) -> str | None:
@@ -1083,11 +1323,19 @@ def _eta_to_seconds(eta: str | None) -> int | None:
         return None
 
 def _nvidia_smi_stats() -> dict[int, dict]:
+    def number(value: str):
+        try:
+            if value in {'N/A', '[N/A]', ''}:
+                return None
+            return float(value)
+        except Exception:
+            return None
+
     try:
         result = subprocess.run(
             [
                 'nvidia-smi',
-                '--query-gpu=index,utilization.gpu,temperature.gpu,power.draw,power.limit',
+                '--query-gpu=index,utilization.gpu,memory.used,memory.total,memory.free,temperature.gpu,power.draw,power.limit',
                 '--format=csv,noheader,nounits',
             ],
             capture_output=True, text=True, timeout=2,
@@ -1097,18 +1345,55 @@ def _nvidia_smi_stats() -> dict[int, dict]:
         stats = {}
         for line in result.stdout.splitlines():
             parts = [part.strip() for part in line.split(',')]
-            if len(parts) < 5:
+            if len(parts) < 8:
                 continue
             index = int(parts[0])
             stats[index] = {
-                'utilization_percent': float(parts[1]),
-                'temperature_c': float(parts[2]),
-                'power_draw_w': float(parts[3]),
-                'power_limit_w': float(parts[4]),
+                'utilization_percent': number(parts[1]),
+                'memory_used_mb': number(parts[2]),
+                'memory_total_mb': number(parts[3]),
+                'memory_free_mb': number(parts[4]),
+                'temperature_c': number(parts[5]),
+                'power_draw_w': number(parts[6]),
+                'power_limit_w': number(parts[7]),
+                'source': 'nvidia-smi',
             }
         return stats
     except Exception:
         return {}
+
+def _count_training_samples(paths: list[str]) -> int:
+    total = 0
+    for value in paths:
+        root = (BASE_DIR / value).resolve()
+        if not root.exists() or not str(root).startswith(str(BASE_DIR.resolve())):
+            continue
+        input_dir = root / 'train' / 'input' if (root / 'train' / 'input').exists() else root / 'input'
+        scan_root = input_dir if input_dir.exists() else root
+        total += sum(1 for path in scan_root.rglob('*') if path.suffix.lower() in IMAGE_EXTENSIONS)
+    return total
+
+def _estimate_training_finish(started_at: float, paired_data: str, epochs: int, batch_size: int, size: int, max_train_samples: int) -> float | None:
+    paths = [path for path in paired_data.split(',') if path]
+    samples = _count_training_samples(paths)
+    if max_train_samples > 0:
+        samples = min(samples, max_train_samples)
+    if samples <= 0:
+        return None
+    batches_per_epoch = max(1, (samples + batch_size - 1) // batch_size)
+    seconds_per_batch = 0.12 * max(1, batch_size) * ((size / 512) ** 2)
+    validation_padding = max(120, batches_per_epoch * 0.08 * seconds_per_batch)
+    return started_at + epochs * batches_per_epoch * seconds_per_batch + epochs * validation_padding
+
+def _estimate_evaluation_finish(started_at: float, paired_data: str, batch_size: int, size: int, max_samples: int) -> float | None:
+    samples = _count_training_samples([paired_data])
+    if max_samples > 0:
+        samples = min(samples, max_samples)
+    if samples <= 0:
+        return None
+    batches = max(1, (samples + batch_size - 1) // batch_size)
+    seconds_per_batch = 0.035 * max(1, batch_size) * ((size / 512) ** 2)
+    return started_at + batches * seconds_per_batch + 60
     try:
         import re as _re
         match = _re.search(r'(\d+)h\s+(\d+)m\s+(\d+)s', eta)
@@ -1125,6 +1410,10 @@ def _set_training_log(lines: list[str]):
     TRAINING_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
     TRAINING_LOG_PATH.write_text('\n'.join(_training_log) + ('\n' if _training_log else ''), encoding='utf-8')
 
+def _load_training_log(lines: list[str]):
+    global _training_log
+    _training_log = lines[-1500:]
+
 def _append_training_log(line: str):
     global _training_log
     _training_log.append(line)
@@ -1133,6 +1422,71 @@ def _append_training_log(line: str):
     TRAINING_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
     with TRAINING_LOG_PATH.open('a', encoding='utf-8') as handle:
         handle.write(line + '\n')
+
+def _pid_running(pid: int | None) -> bool:
+    if not pid:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+def _record_training_pid(pid: int):
+    TRAINING_PID_PATH.parent.mkdir(parents=True, exist_ok=True)
+    TRAINING_PID_PATH.write_text(str(pid), encoding='utf-8')
+
+def _record_training_meta(kind: str, started_at: float, estimated_finish_at: float | None, cmd: list[str]):
+    TRAINING_META_PATH.parent.mkdir(parents=True, exist_ok=True)
+    TRAINING_META_PATH.write_text(json.dumps({
+        'kind': kind,
+        'started_at': started_at,
+        'started_at_wib': _format_wib(started_at),
+        'estimated_finish_at': estimated_finish_at,
+        'estimated_finish_wib': _format_wib(estimated_finish_at),
+        'cmd': cmd,
+    }, indent=2), encoding='utf-8')
+
+def _stored_training_meta() -> dict:
+    try:
+        if TRAINING_META_PATH.exists():
+            return json.loads(TRAINING_META_PATH.read_text(encoding='utf-8'))
+    except Exception:
+        return {}
+    return {}
+
+def _stored_training_pid() -> int | None:
+    try:
+        if TRAINING_PID_PATH.exists():
+            return int(TRAINING_PID_PATH.read_text(encoding='utf-8').strip())
+    except Exception:
+        return None
+    return None
+
+def _training_is_running() -> bool:
+    if _training_process is not None and _training_process.poll() is None:
+        return True
+    pid = _stored_training_pid()
+    if _pid_running(pid):
+        return True
+    try:
+        TRAINING_PID_PATH.unlink(missing_ok=True)
+    except Exception:
+        pass
+    return False
+
+def _monitor_training_process(proc):
+    global _training_process
+    proc.wait()
+    with _training_lock:
+        _append_training_log(f'[INFO] Training process exited with code {proc.returncode}')
+    try:
+        TRAINING_PID_PATH.unlink(missing_ok=True)
+    except Exception:
+        pass
+    _training_process = None
 
 
 # =====================================================================
@@ -1195,214 +1549,47 @@ async def ocr_detect_from_result(request: Request):
 # =====================================================================
 @app.post("/api/pipeline/process")
 async def pipeline_process(request: Request, file: UploadFile = File(...)):
-    """Run full document restoration pipeline with step-by-step results."""
+    """Run the document restoration pipeline in the production order."""
     require_api_auth(request)
+    if doc_restorer_model is None:
+        raise HTTPException(status_code=503, detail='DocumentRestorerNet checkpoint not loaded')
     image = _read_image(file)
-    start_total = time.time()
-    steps = []
-
-    # --- Step 1: Shadow Detection ---
-    start = time.time()
-    mask_pil = None
-    shadow_mask_np = None
-    if doc_restorer_model is not None:
-        with torch.inference_mode():
-            _, mask_pil = run_tiled_restoration(
-                doc_restorer_model, image, device,
-                tile_size=RESTORATION_TILE_SIZE, overlap=RESTORATION_TILE_OVERLAP,
-            )
-        shadow_mask_np = np.array(mask_pil).astype(np.float32) / 255.0
-        shadow_area = (shadow_mask_np > 0.3).sum() / shadow_mask_np.size * 100
-        steps.append({
-            'name': 'shadow_detection',
-            'label': 'Deteksi Bayangan',
-            'time_ms': round((time.time() - start) * 1000),
-            'info': f'Brightness mask terdeteksi, area gelap: {shadow_area:.1f}%',
-        })
-    else:
-        steps.append({'name': 'shadow_detection', 'label': 'Deteksi Bayangan', 'time_ms': 0, 'info': 'Model belum dilatih'})
-
-    # --- Step 2: Shadow Removal ---
-    start = time.time()
-    shadow_removed = None
-    if doc_restorer_model is not None and shadow_mask_np is not None:
-        with torch.inference_mode():
-            restored_pil, _ = run_tiled_restoration(
-                doc_restorer_model, image, device,
-                tile_size=RESTORATION_TILE_SIZE, overlap=RESTORATION_TILE_OVERLAP,
-            )
-        restored_np = np.array(restored_pil)
-        original_np = np.array(image)
-        shadow_removed_np = ai_shadow_postprocess(original_np, restored_np, (shadow_mask_np * 255).astype(np.uint8))
-        shadow_removed = Image.fromarray(shadow_removed_np)
-        steps.append({
-            'name': 'shadow_removal',
-            'label': 'Hapus Bayangan',
-            'time_ms': round((time.time() - start) * 1000),
-            'info': 'AI restoration + classical post-processing (LAB blending)',
-        })
-    else:
-        start = time.time()
-        bgr = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
-        clean = classical_shadow_remove(bgr)
-        shadow_removed = Image.fromarray(cv2.cvtColor(clean, cv2.COLOR_BGR2RGB))
-        steps.append({
-            'name': 'shadow_removal',
-            'label': 'Hapus Bayangan (Classical)',
-            'time_ms': round((time.time() - start) * 1000),
-            'info': 'Classical: gray-world white balance + illumination normalization',
-        })
-
-    # --- Step 3: Color Cast Removal ---
-    start = time.time()
-    color_corrected = remove_color_cast(shadow_removed, strength=0.85)
-    steps.append({
-        'name': 'color_correction',
-        'label': 'Koreksi Warna',
-        'time_ms': round((time.time() - start) * 1000),
-        'info': 'Gray-World white balance, strength=0.85',
-    })
-
-    # --- Step 4: Contrast Enhancement (CLAHE) ---
-    start = time.time()
-    enhanced_contrast = enhance_contrast_clahe(color_corrected, clip_limit=2.0)
-    steps.append({
-        'name': 'contrast_enhance',
-        'label': 'Peningkatan Kontras',
-        'time_ms': round((time.time() - start) * 1000),
-        'info': 'CLAHE (Adaptive Histogram Equalization), clip_limit=2.0',
-    })
-
-    # --- Step 5: Background Noise Removal ---
-    start = time.time()
-    denoised = remove_background_noise(enhanced_contrast)
-    steps.append({
-        'name': 'noise_removal',
-        'label': 'Hapus Noise',
-        'time_ms': round((time.time() - start) * 1000),
-        'info': 'Morphological background estimation + normalization',
-    })
-
-    # --- Step 6: Text Sharpening ---
-    start = time.time()
-    sharpened = enhance_text_sharpness(denoised, strength=1.5)
-    steps.append({
-        'name': 'text_sharpen',
-        'label': 'Tajamkan Teks',
-        'time_ms': round((time.time() - start) * 1000),
-        'info': 'Unsharp masking, strength=1.5',
-    })
-
-    # --- Step 7: Deskew (lightweight) ---
-    start = time.time()
-    final, angle = deskew_document(sharpened)
-    steps.append({
-        'name': 'deskew',
-        'label': 'Koreksi Kemiringan',
-        'time_ms': round((time.time() - start) * 1000),
-        'info': f'Hough lines detected, rotation: {angle:.1f}°' if abs(angle) > 0.5 else 'Tidak perlu koreksi',
-    })
-
-    total_ms = round((time.time() - start_total) * 1000)
+    with torch.inference_mode():
+        final, _, _ = run_document_restoration_pipeline(
+            doc_restorer_model, image, device,
+            tile_size=RESTORATION_TILE_SIZE, overlap=RESTORATION_TILE_OVERLAP,
+        )
     return _pil_to_response(final, filename='pipeline_result.png')
-
-
 
 @app.post("/api/pipeline/process-json")
 async def pipeline_process_json(request: Request, file: UploadFile = File(...)):
-    """Run full pipeline and return step-by-step JSON results with preview images."""
+    """Run the production pipeline and return ordered step metadata."""
     require_api_auth(request)
+    if doc_restorer_model is None:
+        raise HTTPException(status_code=503, detail='DocumentRestorerNet checkpoint not loaded')
     image = _read_image(file)
     start_total = time.time()
-    steps = []
-
-    # --- Step 1: Shadow Detection ---
-    start = time.time()
-    mask_pil = None
-    shadow_mask_np = None
-    if doc_restorer_model is not None:
-        with torch.inference_mode():
-            _, mask_pil = run_tiled_restoration(
-                doc_restorer_model, image, device,
-                tile_size=RESTORATION_TILE_SIZE, overlap=RESTORATION_TILE_OVERLAP,
-            )
-        shadow_mask_np = np.array(mask_pil).astype(np.float32) / 255.0
-        shadow_area = float((shadow_mask_np > 0.3).sum() / shadow_mask_np.size * 100)
-        steps.append({
-            'name': 'shadow_detection',
-            'label': 'Deteksi Bayangan',
-            'status': 'done',
-            'time_ms': round((time.time() - start) * 1000),
-            'info': f'Area gelap: {shadow_area:.1f}%',
-        })
-    else:
-        steps.append({'name': 'shadow_detection', 'label': 'Deteksi Bayangan', 'status': 'skipped', 'time_ms': 0, 'info': 'Model belum dilatih'})
-
-    # --- Step 2: Shadow Removal ---
-    start = time.time()
-    if doc_restorer_model is not None and shadow_mask_np is not None:
-        with torch.inference_mode():
-            restored_pil, _ = run_tiled_restoration(
-                doc_restorer_model, image, device,
-                tile_size=RESTORATION_TILE_SIZE, overlap=RESTORATION_TILE_OVERLAP,
-            )
-        restored_np = np.array(restored_pil)
-        original_np = np.array(image)
-        shadow_removed_np = ai_shadow_postprocess(original_np, restored_np, (shadow_mask_np * 255).astype(np.uint8))
-        shadow_removed = Image.fromarray(shadow_removed_np)
-        steps.append({
-            'name': 'shadow_removal',
-            'label': 'Hapus Bayangan (AI)',
-            'status': 'done',
-            'time_ms': round((time.time() - start) * 1000),
-            'info': 'DocumentRestorerNet + AI shadow postprocess',
-        })
-    else:
-        bgr = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
-        clean = classical_shadow_remove(bgr)
-        shadow_removed = Image.fromarray(cv2.cvtColor(clean, cv2.COLOR_BGR2RGB))
-        steps.append({
-            'name': 'shadow_removal',
-            'label': 'Hapus Bayangan (Classical)',
-            'status': 'done',
-            'time_ms': round((time.time() - start) * 1000),
-            'info': 'White balance + illumination normalization',
-        })
-
-    # --- Step 3: Color Correction ---
-    start = time.time()
-    color_corrected = remove_color_cast(shadow_removed, strength=0.85)
-    steps.append({'name': 'color_correction', 'label': 'Koreksi Warna', 'status': 'done', 'time_ms': round((time.time() - start) * 1000), 'info': 'Gray-world, strength=0.85'})
-
-    # --- Step 4: CLAHE ---
-    start = time.time()
-    enhanced_contrast = enhance_contrast_clahe(color_corrected)
-    steps.append({'name': 'contrast_enhance', 'label': 'Peningkatan Kontras', 'status': 'done', 'time_ms': round((time.time() - start) * 1000), 'info': 'CLAHE clip_limit=2.0'})
-
-    # --- Step 5: Denoise ---
-    start = time.time()
-    denoised = remove_background_noise(enhanced_contrast)
-    steps.append({'name': 'noise_removal', 'label': 'Hapus Noise', 'status': 'done', 'time_ms': round((time.time() - start) * 1000), 'info': 'Morphological normalization'})
-
-    # --- Step 6: Sharpen ---
-    start = time.time()
-    sharpened = enhance_text_sharpness(denoised, strength=1.5)
-    steps.append({'name': 'text_sharpen', 'label': 'Tajamkan Teks', 'status': 'done', 'time_ms': round((time.time() - start) * 1000), 'info': 'Unsharp mask strength=1.5'})
-
-    # --- Step 7: Deskew ---
-    start = time.time()
-    final, angle = deskew_document(sharpened)
-    if abs(angle) > 0.5:
-        steps.append({'name': 'deskew', 'label': 'Koreksi Kemiringan', 'status': 'done', 'time_ms': round((time.time() - start) * 1000), 'info': f'Rotated {angle:.1f}°'})
-    else:
-        steps.append({'name': 'deskew', 'label': 'Koreksi Kemiringan', 'status': 'skipped', 'time_ms': 0, 'info': 'Tidak miring'})
-
+    with torch.inference_mode():
+        final, _, info = run_document_restoration_pipeline(
+            doc_restorer_model, image, device,
+            tile_size=RESTORATION_TILE_SIZE, overlap=RESTORATION_TILE_OVERLAP,
+        )
     total_ms = round((time.time() - start_total) * 1000)
-
+    steps = [
+        {'name': 'input', 'label': 'Input', 'status': 'done', 'time_ms': 0, 'info': f'Original size: {image.size[0]}x{image.size[1]}'},
+        {'name': 'document_segmentation', 'label': 'Document Segmentation', 'status': 'done', 'time_ms': 0, 'info': f'Segmented size: {info["segmented_size"][0]}x{info["segmented_size"][1]}'},
+        {'name': 'shadow_mask_prediction', 'label': 'Shadow Mask / Shadow Matte Prediction', 'status': 'done', 'time_ms': 0, 'info': f'Mask mean: {info["mask_mean"]:.4f}'},
+        {'name': 'illumination_map_estimation', 'label': 'Illumination Map Estimation', 'status': 'done', 'time_ms': 0, 'info': f'Illumination mean: {info["illumination_mean"]:.4f}'},
+        {'name': 'shadow_correction', 'label': 'Shadow Correction', 'status': 'done', 'time_ms': 0, 'info': 'AI restoration blended with illumination gain'},
+        {'name': 'white_balance', 'label': 'White Balance', 'status': 'done', 'time_ms': 0, 'info': 'Gray-world white balance'},
+        {'name': 'local_contrast_enhancement', 'label': 'Local Contrast Enhancement', 'status': 'done', 'time_ms': 0, 'info': 'CLAHE on L channel'},
+        {'name': 'final_document', 'label': 'Final Document', 'status': 'done', 'time_ms': total_ms, 'info': f'Total pipeline time: {total_ms}ms'},
+    ]
     return {
         'success': True,
         'total_ms': total_ms,
         'steps': steps,
+        'pipeline': info['pipeline'],
         'image': f'data:image/png;base64,{_pil_to_b64(final)}',
     }
 
@@ -1424,32 +1611,58 @@ async def start_training(request: Request,
                          clean_data: str = Form(''),
                          paired_data: str = Form(''),
                          validation_paired_data: str = Form(''),
+                         identity_data: str = Form(''),
                          output: str = Form('checkpoints/document_restorer'),
-                         epochs: int = Form(100),
+                         epochs: int = Form(40),
                          batch_size: int = Form(8),
                          size: int = Form(512),
-                         lr: float = Form(2e-4),
+                         lr: float = Form(1e-4),
                          base_channels: int = Form(32),
                          workers: int = Form(4),
                          device: str = Form('auto'),
                          resume: str = Form(''),
                          resume_weights_only: bool = Form(False),
+                         early_stop_patience: int = Form(7),
+                         min_delta: float = Form(1e-4),
+                         grad_clip_norm: float = Form(1.0),
                          perceptual_weight: float = Form(0.05),
                          ssim_weight: float = Form(0.1),
+                         shadow_loss_weight: float = Form(1.25),
+                         illumination_weight: float = Form(0.35),
+                         mask_loss_weight: float = Form(0.2),
+                         gradient_weight: float = Form(0.15),
+                         color_weight: float = Form(0.08),
+                         identity_weight: float = Form(0.25),
                          max_train_samples: int = Form(0),
                          max_val_samples: int = Form(0)):
     require_api_auth(request)
-    global _training_process, _training_log, _training_started_at, _training_kind
+    global _training_process, _training_log, _training_started_at, _training_estimated_finish_at, _training_kind
 
     if _training_process is not None and _training_process.poll() is None:
         raise HTTPException(status_code=409, detail='Training already running')
 
     _validate_training_params(epochs, batch_size, size, lr, base_channels, workers)
+    _validate_training_controls(early_stop_patience, min_delta, grad_clip_norm)
+    _validate_loss_weights(
+        perceptual_weight=perceptual_weight,
+        ssim_weight=ssim_weight,
+        shadow_loss_weight=shadow_loss_weight,
+        illumination_weight=illumination_weight,
+        mask_loss_weight=mask_loss_weight,
+        gradient_weight=gradient_weight,
+        color_weight=color_weight,
+        identity_weight=identity_weight,
+    )
     output = _safe_training_output(output)
+    publish_output = output
+    run_id = datetime.now(tz=WIB).strftime('%Y%m%d-%H%M%S-%f')
+    run_output = f'{output}/runs/{run_id}'
 
     cmd = [
         sys.executable, str(BASE_DIR / 'train.py'),
-        '--output', output,
+        '--output', run_output,
+        '--publish-output', publish_output,
+        '--run-id', run_id,
         '--epochs', str(epochs),
         '--batch-size', str(batch_size),
         '--size', str(size),
@@ -1457,8 +1670,17 @@ async def start_training(request: Request,
         '--base-channels', str(base_channels),
         '--workers', str(workers),
         '--device', device,
+        '--early-stop-patience', str(early_stop_patience),
+        '--min-delta', str(min_delta),
+        '--grad-clip-norm', str(grad_clip_norm),
         '--perceptual-weight', str(perceptual_weight),
         '--ssim-weight', str(ssim_weight),
+        '--shadow-loss-weight', str(shadow_loss_weight),
+        '--illumination-weight', str(illumination_weight),
+        '--mask-loss-weight', str(mask_loss_weight),
+        '--gradient-weight', str(gradient_weight),
+        '--color-weight', str(color_weight),
+        '--identity-weight', str(identity_weight),
     ]
     if clean_data:
         cmd.extend(['--clean-data'] + clean_data.split(','))
@@ -1466,6 +1688,8 @@ async def start_training(request: Request,
         cmd.extend(['--paired-data'] + paired_data.split(','))
     if validation_paired_data:
         cmd.extend(['--validation-paired-data'] + validation_paired_data.split(','))
+    if identity_data:
+        cmd.extend(['--identity-data'] + identity_data.split(','))
     if resume:
         cmd.extend(['--resume', resume])
         if resume_weights_only:
@@ -1477,37 +1701,51 @@ async def start_training(request: Request,
 
     with _training_lock:
         _training_started_at = time.time()
+        _training_estimated_finish_at = _estimate_training_finish(_training_started_at, paired_data, epochs, batch_size, size, max_train_samples)
         _training_kind = 'training'
         _set_training_log([f'[CMD] {" ".join(cmd)}'])
+        _record_training_meta(_training_kind, _training_started_at, _training_estimated_finish_at, cmd)
+        meta = _stored_training_meta()
+        meta.update({'run_id': run_id, 'run_output': run_output, 'publish_output': publish_output})
+        TRAINING_META_PATH.write_text(json.dumps(meta, indent=2), encoding='utf-8')
 
+    log_handle = TRAINING_LOG_PATH.open('a', encoding='utf-8')
     proc = subprocess.Popen(
-        cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        cmd, stdout=log_handle, stderr=subprocess.STDOUT,
         cwd=str(BASE_DIR), env={**os.environ, 'PYTHONPATH': str(BASE_DIR), 'PYTORCH_CUDA_ALLOC_CONF': 'expandable_segments:True'},
         text=True, bufsize=1, start_new_session=True,
     )
+    log_handle.close()
     _training_process = proc
-    threading.Thread(target=_training_log_reader, args=(proc,), daemon=True).start()
-    return {'success': True, 'pid': proc.pid}
+    _record_training_pid(proc.pid)
+    threading.Thread(target=_monitor_training_process, args=(proc,), daemon=True).start()
+    return {'success': True, 'pid': proc.pid, 'run_id': run_id, 'run_output': run_output}
 
 
 @app.post("/api/training/stop")
 async def stop_training(request: Request):
     require_api_auth(request)
     global _training_process
-    if _training_process is None or _training_process.poll() is not None:
+    pid = _training_process.pid if _training_process is not None and _training_process.poll() is None else _stored_training_pid()
+    if not _pid_running(pid):
         return {'success': True, 'message': 'No training running'}
     try:
-        os.killpg(_training_process.pid, signal.SIGTERM)
+        os.killpg(pid, signal.SIGTERM)
     except ProcessLookupError:
         pass
-    try:
-        _training_process.wait(timeout=5)
-    except subprocess.TimeoutExpired:
+    if _training_process is not None:
         try:
-            os.killpg(_training_process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        _training_process.wait(timeout=5)
+            _training_process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            _training_process.wait(timeout=5)
+    try:
+        TRAINING_PID_PATH.unlink(missing_ok=True)
+    except Exception:
+        pass
     _training_process = None
     return {'success': True, 'message': 'Training stopped'}
 
@@ -1521,9 +1759,10 @@ async def evaluate_training(request: Request,
                             batch_size: int = Form(1),
                             workers: int = Form(4),
                             device: str = Form('cuda'),
-                            max_samples: int = Form(0)):
+                            max_samples: int = Form(0),
+                            pipeline: bool = Form(True)):
     require_api_auth(request)
-    global _training_process, _training_log, _training_started_at, _training_kind
+    global _training_process, _training_log, _training_started_at, _training_estimated_finish_at, _training_kind
 
     if _training_process is not None and _training_process.poll() is None:
         raise HTTPException(status_code=409, detail='Training or evaluation already running')
@@ -1544,27 +1783,56 @@ async def evaluate_training(request: Request,
     ]
     if max_samples > 0:
         cmd.extend(['--max-samples', str(max_samples)])
+    if pipeline:
+        cmd.append('--pipeline')
 
     with _training_lock:
         _training_started_at = time.time()
+        _training_estimated_finish_at = _estimate_evaluation_finish(_training_started_at, paired_data, batch_size, size, max_samples)
         _training_kind = 'evaluation'
         _set_training_log([f'[EVAL CMD] {" ".join(cmd)}'])
+        _record_training_meta(_training_kind, _training_started_at, _training_estimated_finish_at, cmd)
 
+    log_handle = TRAINING_LOG_PATH.open('a', encoding='utf-8')
     proc = subprocess.Popen(
-        cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        cmd, stdout=log_handle, stderr=subprocess.STDOUT,
         cwd=str(BASE_DIR), env={**os.environ, 'PYTHONPATH': str(BASE_DIR), 'PYTORCH_CUDA_ALLOC_CONF': 'expandable_segments:True'},
         text=True, bufsize=1, start_new_session=True,
     )
+    log_handle.close()
     _training_process = proc
-    threading.Thread(target=_training_log_reader, args=(proc,), daemon=True).start()
+    _record_training_pid(proc.pid)
+    threading.Thread(target=_monitor_training_process, args=(proc,), daemon=True).start()
     return {'success': True, 'pid': proc.pid}
+
+@app.post("/api/models/export-mobile")
+async def export_mobile_model(request: Request, checkpoint: str = Form(...)):
+    require_api_auth(request)
+    safe_checkpoint = _safe_checkpoint_path(checkpoint)
+    checkpoint_path = BASE_DIR / safe_checkpoint
+    run_name = checkpoint_path.parent.name
+    export_dir = CHECKPOINT_DIR / 'document_restorer' / 'mobile' / run_name
+    export_path = export_dir / f'{checkpoint_path.stem}.onnx'
+    command = [
+        sys.executable, str(BASE_DIR / 'export_mobile_model.py'),
+        '--checkpoint', safe_checkpoint,
+        '--output', str(export_path.relative_to(BASE_DIR)),
+    ]
+    result = subprocess.run(command, cwd=str(BASE_DIR), capture_output=True, text=True)
+    if result.returncode != 0:
+        raise HTTPException(status_code=500, detail=(result.stderr or result.stdout or 'Mobile export failed')[-2000:])
+    return {
+        'success': True,
+        'model': export_path.relative_to(BASE_DIR).as_posix(),
+        'metadata': export_path.with_suffix('.json').relative_to(BASE_DIR).as_posix(),
+    }
 
 @app.get("/api/training/log")
 async def training_log(request: Request, offset: int = 0):
     require_api_auth(request)
     with _training_lock:
-        running = _training_process is not None and _training_process.poll() is None
-        if not _training_log and TRAINING_LOG_PATH.exists():
-            _set_training_log(TRAINING_LOG_PATH.read_text(encoding='utf-8').splitlines())
+        running = _training_is_running()
+        if TRAINING_LOG_PATH.exists():
+            _load_training_log(TRAINING_LOG_PATH.read_text(encoding='utf-8').splitlines())
         lines = _training_log[offset:]
     return {'running': running, 'lines': lines, 'total': len(_training_log)}

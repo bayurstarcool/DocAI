@@ -24,6 +24,7 @@ checkpoints/
 *.zip
 runs/
 exports/
+test_outputs/
 data/
 datasets/
 models/

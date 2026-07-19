@@ -11,22 +11,28 @@
   let logOffset = 0
   let pollTimer = null
   let systemTimer = null
+  let statusTimer = null
   let training = false
   let systemStatus = null
   let evaluation = { exists: false, summary: null, preview_url: null, metrics_url: null }
+  let runs = []
+  let selectedCheckpoint = 'checkpoints/document_restorer/best.pth'
+  let resumeCheckpoint = 'checkpoints/document_restorer/best.pth'
+  let resumeMode = 'weights'
 
   const serverPresets = [
-    { id: 'balanced', name: 'Balanced L4', note: 'Rekomendasi server ini: detail bagus, VRAM aman.', epochs: 120, batchSize: 4, size: 768, lr: 0.0002, workers: 12, perceptualWeight: 0.05, ssimWeight: 0.1, resumeBest: false },
-    { id: 'quality', name: 'Fine-tune Quality', note: 'Final quality: size 1024, LR kecil, resume best.pth.', epochs: 180, batchSize: 2, size: 1024, lr: 0.00005, workers: 8, perceptualWeight: 0.03, ssimWeight: 0.15, resumeBest: true },
-    { id: 'speed', name: 'Speed 512', note: 'Cepat untuk sanity check awal.', epochs: 80, batchSize: 12, size: 512, lr: 0.0002, workers: 12, perceptualWeight: 0.05, ssimWeight: 0.1, resumeBest: false }
+    { id: 'balanced', name: 'Balanced L4', note: 'Baseline kuat: semua paired dataset, mask supervised, size 768.', epochs: 80, batchSize: 4, size: 768, lr: 0.0001, workers: 12, perceptualWeight: 0.05, ssimWeight: 0.1, shadowLossWeight: 1.8, illuminationWeight: 0.55, maskLossWeight: 0.35, gradientWeight: 0.15, colorWeight: 0.08, identityWeight: 0.12, earlyStopPatience: 10, minDelta: 0.0001, gradClipNorm: 1.0, resumeBest: false },
+    { id: 'quality', name: 'Fine-tune Quality', note: 'Final quality: size 1024, LR kecil, resume best.pth weights-only.', epochs: 160, batchSize: 2, size: 1024, lr: 0.00004, workers: 8, perceptualWeight: 0.04, ssimWeight: 0.15, shadowLossWeight: 2.0, illuminationWeight: 0.65, maskLossWeight: 0.4, gradientWeight: 0.2, colorWeight: 0.08, identityWeight: 0.12, earlyStopPatience: 12, minDelta: 0.0001, gradClipNorm: 0.8, resumeBest: true },
+    { id: 'speed', name: 'Speed 512', note: 'Cepat untuk sanity check awal.', epochs: 30, batchSize: 8, size: 512, lr: 0.0002, workers: 12, perceptualWeight: 0.04, ssimWeight: 0.1, shadowLossWeight: 1.6, illuminationWeight: 0.45, maskLossWeight: 0.3, gradientWeight: 0.1, colorWeight: 0.06, identityWeight: 0.1, earlyStopPatience: 6, minDelta: 0.0001, gradClipNorm: 1.0, resumeBest: false }
   ]
 
   let selectedPreset = 'balanced'
-  const config = { epochs: 120, batchSize: 4, size: 768, lr: 0.0002, baseChannels: 32, workers: 12, perceptualWeight: 0.05, ssimWeight: 0.1, resumeBest: false, device: 'cuda', maxTrainSamples: 0, maxValSamples: 0, maxEvalSamples: 0 }
+  const config = { epochs: 80, batchSize: 4, size: 768, lr: 0.0001, baseChannels: 32, workers: 12, perceptualWeight: 0.05, ssimWeight: 0.1, shadowLossWeight: 1.8, illuminationWeight: 0.55, maskLossWeight: 0.35, gradientWeight: 0.15, colorWeight: 0.08, identityWeight: 0.12, earlyStopPatience: 10, minDelta: 0.0001, gradClipNorm: 1.0, resumeBest: false, device: 'cuda', maxTrainSamples: 0, maxValSamples: 0, maxEvalSamples: 0 }
   $: estimatedVram = estimateVram(config.size, config.batchSize)
   $: vramTotal = systemStatus?.gpu?.items?.[0]?.vram_total_gb || 23
   $: vramLevel = estimatedVram > vramTotal * 0.92 ? 'danger' : estimatedVram > vramTotal * 0.75 ? 'warning' : 'safe'
   $: validationDatasets = selectedDatasets.map(path => validationPathFor(path)).filter(Boolean)
+  $: displayProgress = Number(status.progress_percent ?? ((status.current_epoch / status.total_epochs) * 100) ?? 0)
 
   onMount(async () => {
     refreshIcons()
@@ -34,7 +40,9 @@
     await refreshStatus()
     await refreshSystemStatus()
     await refreshEvaluation()
+    await refreshRuns()
     systemTimer = setInterval(refreshSystemStatus, 2000)
+    statusTimer = setInterval(refreshStatus, 2000)
     if (training) {
       log = ''
       logOffset = 0
@@ -46,6 +54,7 @@
   onDestroy(() => {
     if (pollTimer) clearInterval(pollTimer)
     if (systemTimer) clearInterval(systemTimer)
+    if (statusTimer) clearInterval(statusTimer)
   })
 
   async function loadDatasets() {
@@ -76,6 +85,13 @@
     } catch(e) {}
   }
 
+  async function refreshRuns() {
+    try {
+      const data = await apiJson('/api/training/runs')
+      runs = data.runs || []
+    } catch(e) {}
+  }
+
   function pct(value) {
     return Math.max(0, Math.min(100, Number(value) || 0))
   }
@@ -96,8 +112,13 @@
 
     try {
       const formData = new FormData()
-      // Send all selected datasets as comma-separated
-      formData.append('paired_data', selectedDatasets.join(','))
+      const selected = selectedDatasets.map(path => datasets.find(ds => ds.path === path)).filter(Boolean)
+      const paired = selected.filter(ds => ds.kind === 'paired').map(ds => ds.path)
+      const clean = selected.filter(ds => ds.kind === 'clean').map(ds => ds.path)
+      const identity = selected.filter(ds => ds.kind === 'identity').map(ds => ds.path)
+      formData.append('paired_data', paired.join(','))
+      formData.append('clean_data', clean.join(','))
+      formData.append('identity_data', identity.join(','))
       formData.append('epochs', String(config.epochs))
       formData.append('batch_size', String(config.batchSize))
       formData.append('size', String(config.size))
@@ -105,14 +126,24 @@
       formData.append('base_channels', String(config.baseChannels))
       formData.append('workers', String(config.workers))
       formData.append('device', config.device)
+      formData.append('pipeline', 'true')
       formData.append('perceptual_weight', String(config.perceptualWeight))
       formData.append('ssim_weight', String(config.ssimWeight))
+      formData.append('shadow_loss_weight', String(config.shadowLossWeight))
+      formData.append('illumination_weight', String(config.illuminationWeight))
+      formData.append('mask_loss_weight', String(config.maskLossWeight))
+      formData.append('gradient_weight', String(config.gradientWeight))
+      formData.append('color_weight', String(config.colorWeight))
+      formData.append('identity_weight', String(config.identityWeight))
       if (Number(config.maxTrainSamples) > 0) formData.append('max_train_samples', String(config.maxTrainSamples))
       if (Number(config.maxValSamples) > 0) formData.append('max_val_samples', String(config.maxValSamples))
       if (validationDatasets.length) formData.append('validation_paired_data', validationDatasets.join(','))
-      if (config.resumeBest && status.best_exists) {
-        formData.append('resume', 'checkpoints/document_restorer/best.pth')
-        formData.append('resume_weights_only', 'true')
+      formData.append('early_stop_patience', String(config.earlyStopPatience))
+      formData.append('min_delta', String(config.minDelta))
+      formData.append('grad_clip_norm', String(config.gradClipNorm))
+      if (config.resumeBest && resumeCheckpoint) {
+        formData.append('resume', resumeCheckpoint)
+        if (resumeMode === 'weights') formData.append('resume_weights_only', 'true')
       }
       formData.append('output', 'checkpoints/document_restorer')
 
@@ -144,7 +175,7 @@
     try {
       const formData = new FormData()
       formData.append('paired_data', pairedData)
-      formData.append('checkpoint', 'checkpoints/document_restorer/best.pth')
+      formData.append('checkpoint', selectedCheckpoint)
       formData.append('output', 'evaluation/document_restorer')
       formData.append('size', String(config.size))
       formData.append('batch_size', '1')
@@ -168,6 +199,20 @@
       logOffset = 0
       pollTimer = setInterval(pollLog, 2000)
       pollLog()
+    } catch(e) { showToast(e.message, 'error') }
+  }
+
+  async function exportMobile() {
+    try {
+      const formData = new FormData()
+      formData.append('checkpoint', selectedCheckpoint)
+      const token = localStorage.getItem('docai_token')
+      const response = await fetch('/api/models/export-mobile', {
+        method: 'POST', headers: { Authorization: `Bearer ${token}` }, body: formData
+      })
+      const data = await response.json().catch(() => ({}))
+      if (!response.ok) throw new Error(data.detail || 'Export mobile gagal')
+      showToast(`ONNX ready: ${data.model}`)
     } catch(e) { showToast(e.message, 'error') }
   }
 
@@ -204,6 +249,7 @@
   async function pollLog() {
     try {
       const r = await apiJson(`/api/training/log?offset=${logOffset}`)
+      await refreshStatus()
       if (r.lines && r.lines.length) {
         log += r.lines.join('\n') + '\n'
         logOffset = r.total
@@ -218,6 +264,7 @@
         training = false
         refreshStatus()
         refreshEvaluation()
+        refreshRuns()
         showToast('✅ Proses selesai')
       }
     } catch(e) {}
@@ -255,6 +302,15 @@
     config.workers = preset.workers
     config.perceptualWeight = preset.perceptualWeight
     config.ssimWeight = preset.ssimWeight
+    config.shadowLossWeight = preset.shadowLossWeight
+    config.illuminationWeight = preset.illuminationWeight
+    config.maskLossWeight = preset.maskLossWeight
+    config.gradientWeight = preset.gradientWeight
+    config.colorWeight = preset.colorWeight
+    config.identityWeight = preset.identityWeight
+    config.earlyStopPatience = preset.earlyStopPatience
+    config.minDelta = preset.minDelta
+    config.gradClipNorm = preset.gradClipNorm
     config.resumeBest = preset.resumeBest
   }
 
@@ -318,16 +374,24 @@
 
       <div class="form-group">
         <label>Dataset <span class="hint">(pilih satu atau lebih)</span></label>
+        <div class="guide-callout">
+          <strong>Panduan pemilihan dataset</strong>
+          <span class="guide-item"><strong>paired</strong>: paling penting untuk akurasi shadow removal. Pilih semua yang ready.</span>
+          <span class="guide-item"><strong>clean</strong>: hanya gambar bersih. Model membuat degradasi sintetis otomatis.</span>
+          <span class="guide-item"><strong>identity</strong>: input=target bersih. Jaga warna asli area non-shadow. Cocok untuk 20–100 gambar bersihmu sendiri.</span>
+          <span class="guide-item">Kalau belum ada identity, tidak masalah; fokus dulu ke semua paired.</span>
+        </div>
         <div class="dataset-list">
           {#each datasets as ds}
             {@const paired = ds.kind === 'paired'}
             {@const count = paired ? (ds.pair_count || ds.train_pairs || 0) : (ds.image_count || 0)}
             {@const selected = selectedDatasets.includes(ds.path)}
+            {@const selectable = ['paired', 'clean', 'identity'].includes(ds.kind) && ds.ready !== false}
             <div
               class="dataset-option"
               class:selected
-              class:disabled={!ds.ready && paired}
-              onclick={() => ds.ready !== false && toggleDataset(ds.path)}
+              class:disabled={!selectable}
+              onclick={() => selectable && toggleDataset(ds.path)}
             >
               <div class="ds-check">
                 {#if selected}
@@ -340,7 +404,7 @@
                 <div class="ds-name">{ds.name}</div>
                 <div class="ds-meta">
                   {paired ? `${count} train · ${ds.test_count || 0} test` : `${count} images`}
-                  {#if !ds.ready && paired}
+                  {#if !selectable}
                     <span class="ds-warn">⚠️ not ready</span>
                   {/if}
                 </div>
@@ -413,10 +477,63 @@
         </div>
       </div>
 
+      <div class="form-row">
+        <div class="form-group">
+          <label>Shadow Loss Weight</label>
+          <input type="number" bind:value={config.shadowLossWeight} step="0.05" min="0" />
+        </div>
+        <div class="form-group">
+          <label>Illumination Weight</label>
+          <input type="number" bind:value={config.illuminationWeight} step="0.05" min="0" />
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label>Mask Loss Weight</label>
+        <input type="number" bind:value={config.maskLossWeight} step="0.05" min="0" />
+      </div>
+
+      <div class="form-row">
+        <div class="form-group">
+          <label>Gradient Weight</label>
+          <input type="number" bind:value={config.gradientWeight} step="0.05" min="0" />
+        </div>
+        <div class="form-group">
+          <label>Color Weight</label>
+          <input type="number" bind:value={config.colorWeight} step="0.01" min="0" />
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label>Non-shadow Identity Weight</label>
+        <input type="number" bind:value={config.identityWeight} step="0.05" min="0" />
+      </div>
+
       <label class="check-row">
         <input type="checkbox" bind:checked={config.resumeBest} disabled={!status.best_exists} />
         <span>Fine-tune dari `best.pth` dengan optimizer/LR baru</span>
       </label>
+      {#if config.resumeBest}
+        <div class="field">
+          <label>Resume source</label>
+          <select bind:value={resumeCheckpoint}>
+            <option value="checkpoints/document_restorer/best.pth">Live best.pth</option>
+            {#each runs as run}
+              {#each run.checkpoints || [] as checkpoint}
+                <option value={checkpoint.path}>{run.run_id} · {checkpoint.name}</option>
+              {/each}
+            {/each}
+          </select>
+        </div>
+        <div class="field">
+          <label>Resume mode</label>
+          <select bind:value={resumeMode}>
+            <option value="weights">Fine-tune: weights only</option>
+            <option value="full">Continue: optimizer + scheduler + epoch</option>
+          </select>
+          <p class="info-text">Fine-tune memakai LR/config baru. Continue melanjutkan state training lama.</p>
+        </div>
+      {/if}
 
       <div class="form-row">
         <div class="form-group">
@@ -464,13 +581,19 @@
           </span>
         </div>
         {#if training && status.current_epoch != null}
-          <div class="status-item wide">
-            <span class="k">Progress</span>
-            <div class="progress-wrap">
-              <div class="progress-bar">
-                <div class="progress-fill" style="width: {((status.current_epoch / status.total_epochs) * 100) || 0}%"></div>
+        <div class="status-item wide">
+          <span class="k">Progress</span>
+          <div class="progress-wrap">
+            <div class="progress-bar">
+                <div class="progress-fill" style="width: {displayProgress || 0}%"></div>
               </div>
-              <span class="progress-text">{status.current_epoch}/{status.total_epochs} epochs ({Math.round((status.current_epoch / status.total_epochs) * 100)}%)</span>
+              <span class="progress-text">
+                Epoch {status.current_epoch}/{status.total_epochs}
+                {#if status.current_batch != null && status.total_batches}
+                  · Batch {status.current_batch}/{status.total_batches}
+                {/if}
+                · {(displayProgress || 0).toFixed(1)}%
+              </span>
             </div>
           </div>
         {:else}
@@ -486,6 +609,10 @@
           </div>
         {/if}
         {#if status.started_at_wib}
+          <div class="status-item">
+            <span class="k">Jenis Run</span>
+            <span class="v time-text">{status.process_kind || 'training'}</span>
+          </div>
           <div class="status-item">
             <span class="k">Mulai Run</span>
             <span class="v time-text">{status.started_at_wib}</span>
@@ -533,8 +660,25 @@
           <button class="btn btn-outline" onclick={runEvaluation} disabled={training}>
             <i data-lucide="bar-chart-3"></i> Evaluate best.pth
           </button>
+          <button class="btn btn-outline" onclick={exportMobile} disabled={training}>
+            <i data-lucide="smartphone"></i> Export Flutter ONNX
+          </button>
         </div>
       {/if}
+      <div class="field" style="margin-top:1rem">
+        <label>Checkpoint untuk evaluasi</label>
+        <select bind:value={selectedCheckpoint}>
+          <option value="checkpoints/document_restorer/best.pth">Live best.pth</option>
+          <option value="checkpoints/document_restorer/best_psnr.pth">Live best_psnr.pth</option>
+          <option value="checkpoints/document_restorer/best_ssim.pth">Live best_ssim.pth</option>
+          {#each runs as run}
+            {#each run.checkpoints || [] as checkpoint}
+              <option value={checkpoint.path}>{run.run_id} · {checkpoint.name}</option>
+            {/each}
+          {/each}
+        </select>
+        <p class="info-text">Setiap training tersimpan di folder run berbeda. Live best diperbarui atomik dan aman dicoba saat training.</p>
+      </div>
     </div>
 
     {#if evaluation.exists}
@@ -594,12 +738,22 @@
           {#if systemStatus.gpu?.available && systemStatus.gpu?.items?.length}
             {#each systemStatus.gpu.items as gpu}
               <div class="monitor-item wide">
-                <div class="monitor-head"><span>GPU {gpu.index}: {gpu.name}</span><strong>{pct(gpu.utilization_percent ?? gpu.vram_percent).toFixed(0)}%</strong></div>
-                <div class="meter"><div class="meter-fill gpu" style="width:{pct(gpu.utilization_percent ?? gpu.vram_percent)}%"></div></div>
+                <div class="monitor-head"><span>GPU {gpu.index}: {gpu.name}</span><strong>Util {gpu.utilization_percent ?? '—'}%</strong></div>
+                <div class="gpu-bars">
+                  <div>
+                    <div class="mini-label"><span>GPU Util</span><span>{gpu.utilization_percent ?? '—'}%</span></div>
+                    <div class="meter"><div class="meter-fill gpu" style="width:{pct(gpu.utilization_percent)}%"></div></div>
+                  </div>
+                  <div>
+                    <div class="mini-label"><span>VRAM</span><span>{pct(gpu.vram_percent).toFixed(0)}%</span></div>
+                    <div class="meter"><div class="meter-fill ram" style="width:{pct(gpu.vram_percent)}%"></div></div>
+                  </div>
+                </div>
                 <div class="monitor-meta">
-                  Util {gpu.utilization_percent ?? '—'}% · VRAM {gpu.vram_used_gb} / {gpu.vram_total_gb} GB ({pct(gpu.vram_percent).toFixed(0)}%) · free {gpu.vram_free_gb} GB
+                  VRAM {gpu.vram_used_gb} / {gpu.vram_total_gb} GB · free {gpu.vram_free_gb} GB
                   {#if gpu.temperature_c != null} · {gpu.temperature_c}°C{/if}
                   {#if gpu.power_draw_w != null} · {gpu.power_draw_w} / {gpu.power_limit_w} W{/if}
+                  {#if gpu.stats_source} · {gpu.stats_source}{/if}
                 </div>
               </div>
             {/each}
@@ -707,9 +861,13 @@
   .ds-badge { font-size: 0.6rem; font-weight: 700; text-transform: uppercase; padding: 0.15rem 0.5rem; border-radius: 999px; flex-shrink: 0; }
   .ds-badge.paired { background: rgba(16,185,129,0.15); color: var(--success); }
   .ds-badge.clean { background: rgba(99,102,241,0.15); color: var(--primary); }
+  .ds-badge.identity { background: rgba(245,158,11,0.15); color: var(--warning); }
   .ds-badge.unknown { background: rgba(113,113,122,0.15); color: var(--text3); }
   .empty-datasets { padding: 2rem; text-align: center; color: var(--text3); font-size: 0.85rem; }
   .ds-summary { margin-top: 0.5rem; font-size: 0.75rem; color: var(--text2); text-align: right; }
+  .guide-callout { background: var(--bg); border: 1px solid var(--border); border-left: 3px solid var(--accent); border-radius: var(--radius-xs); padding: 0.75rem; margin-top: 0.5rem; display: flex; flex-direction: column; gap: 0.35rem; font-size: 0.78rem; color: var(--text2); }
+  .guide-callout strong { color: var(--text); font-size: 0.82rem; }
+  .guide-item { display: block; }
 
   .form-actions { margin-top: 1.25rem; padding-top: 1.25rem; border-top: 1px solid var(--border); }
   .btn { display: inline-flex; align-items: center; gap: 0.5rem; padding: 0.625rem 1.25rem; border-radius: var(--radius-xs); font-size: 0.875rem; font-weight: 600; border: none; transition: all 0.15s; cursor: pointer; }
@@ -743,6 +901,8 @@
   .meter-fill.ram { background: linear-gradient(90deg, #8b5cf6, #6366f1); }
   .meter-fill.disk { background: linear-gradient(90deg, #f59e0b, #f97316); }
   .meter-fill.gpu { background: linear-gradient(90deg, #10b981, #22c55e); }
+  .gpu-bars { display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem; margin-bottom: 0.45rem; }
+  .mini-label { display: flex; justify-content: space-between; color: var(--text2); font-size: 0.68rem; margin-bottom: 0.25rem; }
 
   /* Chart */
   .chart-wrap { background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-xs); padding: 1rem; }

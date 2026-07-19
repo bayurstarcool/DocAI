@@ -16,6 +16,7 @@
 
   const modes = [
     { id: 'restore', icon: 'wand-2', label: 'AI Restore' },
+    { id: 'full_pipeline', icon: 'workflow', label: 'Full Pipeline' },
     { id: 'shadow_remove', icon: 'sun-dim', label: 'Shadow Remove' },
     { id: 'enhance', icon: 'sparkles', label: 'AI Enhance' },
     { id: 'magic_enhance', icon: 'magic-wand', label: 'Magic Enhance' },
@@ -47,6 +48,7 @@
     selectedFile = file
     const r = new FileReader()
     r.onload = () => {
+      pipelineResult = null
       resultUrl = ''
       resultBlob = null
     }
@@ -183,6 +185,25 @@
       <div class="header"><i data-lucide="sparkles"></i> Result</div>
       <img src={resultUrl} alt="Result" />
     </div>
+  </div>
+{/if}
+
+{#if pipelineResult?.steps?.length}
+  <div class="card pipeline-card">
+    <h2><i data-lucide="workflow"></i> Pipeline</h2>
+    <div class="pipeline-timeline">
+      {#each pipelineResult.steps as step, index}
+        <div class="pipeline-step {step.status}">
+          <div class="step-indicator">{index + 1}</div>
+          <div class="step-info">
+            <div class="step-label">{step.label}</div>
+            <div class="step-detail">{step.info}</div>
+          </div>
+          <div class="step-time">{step.time_ms}ms</div>
+        </div>
+      {/each}
+    </div>
+    <div class="pipeline-summary">Total: {pipelineResult.total_ms}ms</div>
   </div>
 {/if}
 

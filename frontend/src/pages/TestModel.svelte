@@ -11,6 +11,9 @@
   let resultUrl = ''
   let processing = false
   let docshadowWeights = []
+  let trainedRuns = []
+  let selectedCheckpoint = 'checkpoints/document_restorer/best.pth'
+  let loadedCheckpoint = ''
 
   const modes = ['restore','shadow_remove','enhance','magic_enhance','binarize','cleanup','clahe','denoise','sharpen','deskew']
   const pretrainedModes = ['SD7K', 'Jung', 'Kligler'].map(name => ({ name }))
@@ -30,6 +33,10 @@
       const d = await apiJson('/api/docshadow/weights')
       docshadowWeights = d.weights || []
     } catch(e) { docshadowWeights = [] }
+    try {
+      const d = await apiJson('/api/training/runs')
+      trainedRuns = d.runs || []
+    } catch(e) { trainedRuns = [] }
   })
 
   onDestroy(() => {
@@ -65,6 +72,18 @@
     const start = performance.now()
     try {
       const token = localStorage.getItem('docai_token')
+      if (!selectedMode.startsWith('docshadow:') && selectedCheckpoint !== loadedCheckpoint) {
+        const reload = await fetch('/api/model/reload', {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ checkpoint: selectedCheckpoint })
+        })
+        if (!reload.ok) {
+          const error = await reload.json().catch(() => ({}))
+          throw new Error(error.detail || 'Gagal load checkpoint')
+        }
+        loadedCheckpoint = selectedCheckpoint
+      }
       let endpoint = '/api/scan'
       if (selectedMode.startsWith('docshadow:')) {
         fd.set('mode', 'docshadow')
@@ -135,6 +154,19 @@
             : 'Model lokal dan mode enhancement DocAI.'}
         </p>
       </div>
+      {#if selectedModelFamily === 'docai'}
+        <div class="model-select">
+          <label>Trained checkpoint</label>
+          <select bind:value={selectedCheckpoint}>
+            <option value="checkpoints/document_restorer/best.pth">Live best.pth</option>
+            {#each trainedRuns as run}
+              {#each run.checkpoints || [] as checkpoint}
+                <option value={checkpoint.path}>{run.run_id} · {checkpoint.name}</option>
+              {/each}
+            {/each}
+          </select>
+        </div>
+      {/if}
       <div style="margin-top:1rem;display:flex;align-items:center;gap:0.75rem">
         <button class="btn btn-primary" onclick={runTest} disabled={!selectedFile || processing}>
           {#if processing}<div class="spinner" style="width:16px;height:16px;border-width:2px"></div>{:else}<i data-lucide="play"></i>{/if}

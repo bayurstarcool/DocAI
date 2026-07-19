@@ -7,6 +7,11 @@ def _smooth_noise(h,w,scale=6):
     noise = cv2.GaussianBlur(noise,(0,0),sigmaX=max(h,w)/35)
     return (noise-noise.min())/(noise.max()-noise.min()+1e-6)
 
+def _clean_shadow_mask(mask):
+    mask = cv2.GaussianBlur(mask.astype(np.float32), (0, 0), 1.0)
+    mask = np.clip((mask - 0.04) / 0.42, 0, 1)
+    return mask.astype(np.float32)
+
 def random_shadow_mask(h,w):
     mask = np.zeros((h,w), np.float32)
     # soft blobs / hand-like shadows
@@ -27,7 +32,7 @@ def random_shadow_mask(h,w):
         tmp=cv2.GaussianBlur(tmp,(151,151),0)
         mask=np.maximum(mask,tmp*random.uniform(.25,.85))
     mask *= _smooth_noise(h,w,random.randint(4,12))*0.7+0.3
-    return np.clip(mask,0,1)
+    return _clean_shadow_mask(mask)
 
 def _line_shadow(h,w,angle=None,width=None,offset=None,blur=None,strength=None):
     angle = random.uniform(-35,35) if angle is None else angle
@@ -95,7 +100,7 @@ def object_shadow_mask(h,w):
     if 'hand' in modes: mask=np.maximum(mask,_hand_blob_mask(h,w))
     if 'edge' in modes: mask=np.maximum(mask,_edge_cast_mask(h,w))
     noise=_smooth_noise(h,w,random.randint(5,14))*0.35+0.75
-    return np.clip(mask*noise,0,1)
+    return _clean_shadow_mask(np.clip(mask*noise,0,1))
 
 def apply_object_shadow(clean_rgb, return_mask=False):
     img=clean_rgb.astype(np.float32)/255.0
