@@ -9,6 +9,7 @@ __pycache__/
 venv/
 .env
 .admin_env
+token_github.txt
 
 # Node / frontend
 frontend/node_modules/
