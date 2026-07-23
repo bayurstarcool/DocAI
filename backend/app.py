@@ -846,10 +846,18 @@ async def training_status(request: Request):
     last_path = CHECKPOINT_DIR / 'document_restorer' / 'last.pth'
     preview_dir = active_output_path / 'previews'
     latest_preview = None
+    latest_previews = []
     if preview_dir.exists():
         previews = sorted(preview_dir.glob('epoch_*.png'), key=lambda path: path.stat().st_mtime, reverse=True)
         if previews:
             latest_preview = previews[0].name
+            for preview in previews[:12]:
+                latest_previews.append({
+                    'name': preview.name,
+                    'epoch': preview.stem.replace('epoch_', ''),
+                    'mtime': int(preview.stat().st_mtime),
+                    'url': f'/api/training/preview/{preview.name}?run_id={meta.get("run_id", "")}&v={int(preview.stat().st_mtime)}',
+                })
 
     # Parse ETA and progress from training log
     eta = None
@@ -862,6 +870,8 @@ async def training_status(request: Request):
     last_val_psnr = None
     last_val_ssim = None
     with _training_lock:
+        if not _training_log and TRAINING_LOG_PATH.exists():
+            _load_training_log(TRAINING_LOG_PATH.read_text(encoding='utf-8').splitlines())
         for line in reversed(_training_log):
             # Parse eta=1h 23m 45s from epoch log line
             import re as _re
@@ -919,7 +929,7 @@ async def training_status(request: Request):
         'run_command': meta.get('cmd'),
         'has_history': bool(history),
         'epochs': len(history.get('train_loss', [])),
-        'best_loss': min(history.get('val_loss', [float('inf')])),
+        'best_loss': (min(history.get('val_loss', [])) if history.get('val_loss') else None),
         'best_exists': best_path.exists(),
         'last_exists': last_path.exists(),
         'history': history,
@@ -937,7 +947,11 @@ async def training_status(request: Request):
         'model_mtime': model_mtime,
         'active_run_id': meta.get('run_id'),
         'active_run_output': active_output,
+        'training_mode': meta.get('training_mode'),
+        'run_config': meta.get('run_config'),
+        'log_path': meta.get('log_path'),
         'latest_preview_url': f'/api/training/preview/{latest_preview}?run_id={meta.get("run_id", "")}&v={int((preview_dir / latest_preview).stat().st_mtime)}' if latest_preview else None,
+        'latest_previews': latest_previews,
     }
 
 
@@ -1600,6 +1614,15 @@ def _format_wib(timestamp: float | None) -> str | None:
 def _eta_to_seconds(eta: str | None) -> int | None:
     if not eta:
         return None
+    try:
+        import re as _re
+        match = _re.search(r'(\d+)h\s+(\d+)m\s+(\d+)s', eta)
+        if not match:
+            return None
+        hours, minutes, seconds = (int(value) for value in match.groups())
+        return hours * 3600 + minutes * 60 + seconds
+    except Exception:
+        return None
 
 def _nvidia_smi_stats() -> dict[int, dict]:
     def number(value: str):
@@ -1673,15 +1696,6 @@ def _estimate_evaluation_finish(started_at: float, paired_data: str, batch_size:
     batches = max(1, (samples + batch_size - 1) // batch_size)
     seconds_per_batch = 0.035 * max(1, batch_size) * ((size / 512) ** 2)
     return started_at + batches * seconds_per_batch + 60
-    try:
-        import re as _re
-        match = _re.search(r'(\d+)h\s+(\d+)m\s+(\d+)s', eta)
-        if not match:
-            return None
-        hours, minutes, seconds = (int(value) for value in match.groups())
-        return hours * 3600 + minutes * 60 + seconds
-    except Exception:
-        return None
 
 def _set_training_log(lines: list[str]):
     global _training_log
@@ -1717,16 +1731,18 @@ def _record_training_pid(pid: int):
     TRAINING_PID_PATH.parent.mkdir(parents=True, exist_ok=True)
     TRAINING_PID_PATH.write_text(str(pid), encoding='utf-8')
 
-def _record_training_meta(kind: str, started_at: float, estimated_finish_at: float | None, cmd: list[str]):
+def _record_training_meta(kind: str, started_at: float, estimated_finish_at: float | None, cmd: list[str], **extra):
     TRAINING_META_PATH.parent.mkdir(parents=True, exist_ok=True)
-    TRAINING_META_PATH.write_text(json.dumps({
+    payload = {
         'kind': kind,
         'started_at': started_at,
         'started_at_wib': _format_wib(started_at),
         'estimated_finish_at': estimated_finish_at,
         'estimated_finish_wib': _format_wib(estimated_finish_at),
         'cmd': cmd,
-    }, indent=2), encoding='utf-8')
+    }
+    payload.update(extra)
+    TRAINING_META_PATH.write_text(json.dumps(payload, indent=2), encoding='utf-8')
 
 def _stored_training_meta() -> dict:
     try:
@@ -1744,11 +1760,44 @@ def _stored_training_pid() -> int | None:
         return None
     return None
 
+def _process_matches_training(pid: int | None) -> bool:
+    if not pid or not _pid_running(pid):
+        return False
+    try:
+        proc = psutil.Process(pid)
+        cmdline = ' '.join(proc.cmdline())
+        return 'train.py' in cmdline or 'evaluate_restorer.py' in cmdline
+    except Exception:
+        return False
+
+def _find_training_pid() -> int | None:
+    pid = _stored_training_pid()
+    if _process_matches_training(pid):
+        return pid
+    meta = _stored_training_meta()
+    active_run_id = meta.get('run_id') or ''
+    try:
+        result = subprocess.run(['pgrep', '-af', 'train.py|evaluate_restorer.py'], capture_output=True, text=True, timeout=2)
+        for line in result.stdout.splitlines():
+            parts = line.strip().split(' ', 1)
+            if not parts or not parts[0].isdigit():
+                continue
+            cmdline = parts[1] if len(parts) > 1 else ''
+            if active_run_id and active_run_id not in cmdline:
+                continue
+            if 'multiprocessing.forkserver' in cmdline:
+                continue
+            return int(parts[0])
+    except Exception:
+        pass
+    return None
+
 def _training_is_running() -> bool:
     if _training_process is not None and _training_process.poll() is None:
         return True
-    pid = _stored_training_pid()
-    if _pid_running(pid):
+    pid = _find_training_pid()
+    if pid:
+        _record_training_pid(pid)
         return True
     try:
         TRAINING_PID_PATH.unlink(missing_ok=True)
@@ -1906,18 +1955,22 @@ async def start_training(request: Request,
                          grad_clip_norm: float = Form(1.0),
                          perceptual_weight: float = Form(0.05),
                          ssim_weight: float = Form(0.1),
-                         shadow_loss_weight: float = Form(1.25),
-                         illumination_weight: float = Form(0.35),
-                         mask_loss_weight: float = Form(0.2),
-                         gradient_weight: float = Form(0.15),
-                         color_weight: float = Form(0.08),
-                         identity_weight: float = Form(0.25),
+                         shadow_loss_weight: float = Form(1.0),
+                         illumination_weight: float = Form(0.10),
+                         mask_loss_weight: float = Form(0.25),
+                         gradient_weight: float = Form(0.05),
+                         color_weight: float = Form(0.15),
+                         identity_weight: float = Form(1.0),
+                         color_preservation_weight: float = Form(0.8),
+                         text_weight: float = Form(0.2),
+                         non_shadow_weight: float = Form(0.5),
+                         warmup_epochs: int = Form(3),
                          max_train_samples: int = Form(0),
                          max_val_samples: int = Form(0)):
     # require_api_auth(request)  # Public for image loading
     global _training_process, _training_log, _training_started_at, _training_estimated_finish_at, _training_kind
 
-    if _training_process is not None and _training_process.poll() is None:
+    if _training_is_running():
         raise HTTPException(status_code=409, detail='Training already running')
 
     _validate_training_params(epochs, batch_size, size, lr, base_channels, workers)
@@ -1931,6 +1984,9 @@ async def start_training(request: Request,
         gradient_weight=gradient_weight,
         color_weight=color_weight,
         identity_weight=identity_weight,
+        color_preservation_weight=color_preservation_weight,
+        text_weight=text_weight,
+        non_shadow_weight=non_shadow_weight,
     )
     output = _safe_training_output(output)
     publish_output = output
@@ -1960,6 +2016,10 @@ async def start_training(request: Request,
         '--gradient-weight', str(gradient_weight),
         '--color-weight', str(color_weight),
         '--identity-weight', str(identity_weight),
+        '--color-preservation-weight', str(color_preservation_weight),
+        '--text-weight', str(text_weight),
+        '--non-shadow-weight', str(non_shadow_weight),
+        '--warmup-epochs', str(warmup_epochs),
     ]
     if clean_data:
         cmd.extend(['--clean-data'] + clean_data.split(','))
@@ -1983,10 +2043,26 @@ async def start_training(request: Request,
         _training_estimated_finish_at = _estimate_training_finish(_training_started_at, paired_data, epochs, batch_size, size, max_train_samples)
         _training_kind = 'training'
         _set_training_log([f'[CMD] {" ".join(cmd)}'])
-        _record_training_meta(_training_kind, _training_started_at, _training_estimated_finish_at, cmd)
-        meta = _stored_training_meta()
-        meta.update({'run_id': run_id, 'run_output': run_output, 'publish_output': publish_output})
-        TRAINING_META_PATH.write_text(json.dumps(meta, indent=2), encoding='utf-8')
+        training_mode = 'fine_tune' if (resume and resume_weights_only) else ('resume' if resume else 'train')
+        run_config = {
+            'epochs': epochs, 'batch_size': batch_size, 'size': size, 'lr': lr,
+            'base_channels': base_channels, 'workers': workers, 'device': device,
+            'early_stop_patience': early_stop_patience, 'min_delta': min_delta, 'grad_clip_norm': grad_clip_norm,
+            'perceptual_weight': perceptual_weight, 'ssim_weight': ssim_weight,
+            'shadow_loss_weight': shadow_loss_weight, 'illumination_weight': illumination_weight,
+            'mask_loss_weight': mask_loss_weight, 'gradient_weight': gradient_weight,
+            'color_weight': color_weight, 'identity_weight': identity_weight,
+            'color_preservation_weight': color_preservation_weight, 'text_weight': text_weight,
+            'non_shadow_weight': non_shadow_weight, 'warmup_epochs': warmup_epochs,
+            'resume': resume, 'resume_weights_only': resume_weights_only,
+            'paired_data': paired_data, 'clean_data': clean_data, 'identity_data': identity_data,
+            'validation_paired_data': validation_paired_data,
+        }
+        _record_training_meta(
+            _training_kind, _training_started_at, _training_estimated_finish_at, cmd,
+            run_id=run_id, run_output=run_output, publish_output=publish_output,
+            training_mode=training_mode, run_config=run_config, log_path=str(TRAINING_LOG_PATH.relative_to(BASE_DIR)),
+        )
 
     log_handle = TRAINING_LOG_PATH.open('a', encoding='utf-8')
     proc = subprocess.Popen(

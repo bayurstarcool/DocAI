@@ -28,11 +28,12 @@
   const serverPresets = [
     { id: 'balanced', name: 'Balanced L4', note: 'Baseline kuat: semua paired dataset, mask supervised, size 768.', epochs: 80, batchSize: 4, size: 768, lr: 0.0001, workers: 12, perceptualWeight: 0.05, ssimWeight: 0.1, shadowLossWeight: 1.8, illuminationWeight: 0.55, maskLossWeight: 0.35, gradientWeight: 0.15, colorWeight: 0.08, identityWeight: 0.12, earlyStopPatience: 10, minDelta: 0.0001, gradClipNorm: 1.0, resumeBest: false },
     { id: 'quality', name: 'Fine-tune Quality', note: 'Final quality: size 1024, LR kecil, resume best.pth weights-only.', epochs: 160, batchSize: 2, size: 1024, lr: 0.00004, workers: 8, perceptualWeight: 0.04, ssimWeight: 0.15, shadowLossWeight: 2.0, illuminationWeight: 0.65, maskLossWeight: 0.4, gradientWeight: 0.2, colorWeight: 0.08, identityWeight: 0.12, earlyStopPatience: 12, minDelta: 0.0001, gradClipNorm: 0.8, resumeBest: true },
-    { id: 'speed', name: 'Speed 512', note: 'Cepat untuk sanity check awal.', epochs: 30, batchSize: 8, size: 512, lr: 0.0002, workers: 12, perceptualWeight: 0.04, ssimWeight: 0.1, shadowLossWeight: 1.6, illuminationWeight: 0.45, maskLossWeight: 0.3, gradientWeight: 0.1, colorWeight: 0.06, identityWeight: 0.1, earlyStopPatience: 6, minDelta: 0.0001, gradClipNorm: 1.0, resumeBest: false }
+    { id: 'speed', name: 'Speed 512', note: 'Cepat untuk sanity check awal.', epochs: 30, batchSize: 8, size: 512, lr: 0.0002, workers: 12, perceptualWeight: 0.04, ssimWeight: 0.1, shadowLossWeight: 1.6, illuminationWeight: 0.45, maskLossWeight: 0.3, gradientWeight: 0.1, colorWeight: 0.06, identityWeight: 0.1, colorPreservationWeight: 0.3, textWeight: 0.4, nonShadowWeight: 0.25, warmupEpochs: 3, earlyStopPatience: 6, minDelta: 0.0001, gradClipNorm: 1.0, resumeBest: false },
+    { id: 'v3', name: 'V3 Safe Fine-tune', note: 'Anti artefak: Charbonnier, perceptual kecil, identity/color kuat.', epochs: 30, batchSize: 5, size: 768, lr: 0.000005, workers: 4, perceptualWeight: 0.01, ssimWeight: 0.25, shadowLossWeight: 1.0, illuminationWeight: 0.10, maskLossWeight: 0.25, gradientWeight: 0.05, colorWeight: 0.15, identityWeight: 1.0, colorPreservationWeight: 0.8, textWeight: 0.2, nonShadowWeight: 0.5, warmupEpochs: 3, earlyStopPatience: 12, minDelta: 0.0001, gradClipNorm: 1.0, resumeBest: true }
   ]
 
-  let selectedPreset = 'balanced'
-  const config = { epochs: 80, batchSize: 4, size: 768, lr: 0.0001, baseChannels: 32, workers: 12, perceptualWeight: 0.05, ssimWeight: 0.1, shadowLossWeight: 1.8, illuminationWeight: 0.55, maskLossWeight: 0.35, gradientWeight: 0.15, colorWeight: 0.08, identityWeight: 0.12, earlyStopPatience: 10, minDelta: 0.0001, gradClipNorm: 1.0, resumeBest: false, device: 'cuda', maxTrainSamples: 0, maxValSamples: 0, maxEvalSamples: 0 }
+  let selectedPreset = 'v3'
+  const config = { epochs: 30, batchSize: 5, size: 768, lr: 0.000005, baseChannels: 32, workers: 4, perceptualWeight: 0.01, ssimWeight: 0.25, shadowLossWeight: 1.0, illuminationWeight: 0.10, maskLossWeight: 0.25, gradientWeight: 0.05, colorWeight: 0.15, identityWeight: 1.0, colorPreservationWeight: 0.8, textWeight: 0.2, nonShadowWeight: 0.5, warmupEpochs: 3, earlyStopPatience: 12, minDelta: 0.0001, gradClipNorm: 1.0, resumeBest: true, device: 'cuda', maxTrainSamples: 0, maxValSamples: 0, maxEvalSamples: 0 }
   $: estimatedVram = estimateVram(config.size, config.batchSize)
   $: vramTotal = systemStatus?.gpu?.items?.[0]?.vram_total_gb || 23
   $: vramLevel = estimatedVram > vramTotal * 0.92 ? 'danger' : estimatedVram > vramTotal * 0.75 ? 'warning' : 'safe'
@@ -55,6 +56,8 @@
       lr: value('--lr'), base_channels: value('--base-channels'), workers: value('--workers'),
       device: value('--device'), early_stop_patience: value('--early-stop-patience'),
       grad_clip_norm: value('--grad-clip-norm'), identity_weight: value('--identity-weight'),
+      color_preservation_weight: value('--color-preservation-weight'), text_weight: value('--text-weight'),
+      non_shadow_weight: value('--non-shadow-weight'), warmup_epochs: value('--warmup-epochs'),
       resume: value('--resume')
     }
   }
@@ -205,6 +208,10 @@
       formData.append('gradient_weight', String(config.gradientWeight))
       formData.append('color_weight', String(config.colorWeight))
       formData.append('identity_weight', String(config.identityWeight))
+      formData.append('color_preservation_weight', String(config.colorPreservationWeight))
+      formData.append('text_weight', String(config.textWeight))
+      formData.append('non_shadow_weight', String(config.nonShadowWeight))
+      formData.append('warmup_epochs', String(config.warmupEpochs))
       if (Number(config.maxTrainSamples) > 0) formData.append('max_train_samples', String(config.maxTrainSamples))
       if (Number(config.maxValSamples) > 0) formData.append('max_val_samples', String(config.maxValSamples))
       if (validationDatasets.length) formData.append('validation_paired_data', validationDatasets.join(','))
@@ -600,6 +607,22 @@
         <label>Non-shadow Identity Weight</label>
         <input type="number" bind:value={config.identityWeight} step="0.05" min="0" />
       </div>
+      <div class="form-group">
+        <label>Color Preservation Weight</label>
+        <input type="number" bind:value={config.colorPreservationWeight} step="0.05" min="0" />
+      </div>
+      <div class="form-group">
+        <label>Text Weight</label>
+        <input type="number" bind:value={config.textWeight} step="0.05" min="0" />
+      </div>
+      <div class="form-group">
+        <label>Non-shadow Change Weight</label>
+        <input type="number" bind:value={config.nonShadowWeight} step="0.05" min="0" />
+      </div>
+      <div class="form-group">
+        <label>Warmup Epochs</label>
+        <input type="number" bind:value={config.warmupEpochs} step="1" min="0" />
+      </div>
 
       <label class="check-row">
         <input type="checkbox" bind:checked={config.resumeBest} disabled={!status.best_exists} />
@@ -893,6 +916,13 @@
         <div class="preview-box">
           <img src={status.latest_preview_url} alt="Latest validation preview" />
         </div>
+        {#if status.latest_previews?.length > 1}
+          <div class="preview-strip">
+            {#each status.latest_previews as preview}
+              <a href={preview.url} target="_blank" rel="noreferrer" class="preview-chip">Epoch {preview.epoch}</a>
+            {/each}
+          </div>
+        {/if}
       </div>
     {/if}
 
@@ -1057,6 +1087,9 @@
   .btn-outline:hover { background: rgba(6,182,212,0.1); }
   .model-actions { margin-top: 0.75rem; display: flex; flex-wrap: wrap; gap: 0.625rem; }
   .model-actions a { text-decoration: none; }
+  .preview-strip { display: flex; flex-wrap: wrap; gap: 0.4rem; margin-top: 0.75rem; }
+  .preview-chip { border: 1px solid var(--border); border-radius: 999px; padding: 0.25rem 0.55rem; color: var(--text2); font-size: 0.78rem; text-decoration: none; background: var(--bg); }
+  .preview-chip:hover { color: var(--text); border-color: var(--primary); }
   .eval-preview { margin-top: 0.75rem; }
 
   .footer { text-align: center; padding: 2rem 0; color: var(--text3); font-size: 0.8rem; }

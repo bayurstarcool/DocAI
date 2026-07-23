@@ -578,8 +578,9 @@ def main():
         validation_ssim = 0.0
         validation_samples = 0
         preview_saved = False
+        preview_batch_index = epoch % max(len(validation_loader), 1)
         with torch.inference_mode():
-            for batch in validation_loader:
+            for validation_batch_index, batch in enumerate(validation_loader):
                 source = batch['input'].to(device, non_blocking=True)
                 target = batch['target'].to(device, non_blocking=True)
                 mask = batch['mask'].to(device, non_blocking=True)
@@ -594,9 +595,12 @@ def main():
                         restored[sample_index:sample_index + 1], target[sample_index:sample_index + 1]
                     ).item()
                 validation_samples += batch_size
-                if not preview_saved:
+                # Rotate preview batch each epoch so Latest Validation Preview is not stuck on same samples.
+                if not preview_saved and validation_batch_index >= preview_batch_index:
                     save_validation_preview(output_dir, epoch + 1, source, restored, target, mask, predicted_mask)
                     preview_saved = True
+            if not preview_saved:
+                save_validation_preview(output_dir, epoch + 1, source, restored, target, mask, predicted_mask)
 
         validation_loss /= validation_samples
         validation_psnr /= validation_samples
