@@ -1,9 +1,13 @@
 """Train custom AI for document shadow removal and restoration.
 
-v2 changes:
-- Perceptual loss (VGG-16 features) for better visual quality
-- SSIM loss for structural similarity
-- Better loss weighting
+v3 changes:
+- Charbonnier loss replaces L1 (smoother gradients, fewer artifacts)
+- Reduced perceptual loss (prevents texture fabrication)
+- Increased SSIM weight (better structural preservation)
+- Strong identity preservation (non-shadow areas must not change)
+- Strong color preservation (stamps/meterai must keep color)
+- Reduced shadow aggression (prevents halos)
+- Added non-shadow consistency loss
 """
 
 import argparse
@@ -23,12 +27,12 @@ from torch.utils.data import ConcatDataset, DataLoader, Subset, WeightedRandomSa
 from torchvision import models
 from torchvision.utils import save_image
 
-from backend.datasets.restoration_dataset import build_restoration_dataset, sd7k_split_paths
+from backend.datasets.restoration_dataset import IdentityDocumentDataset, build_restoration_dataset, sd7k_split_paths
 from backend.models.document_restorer import DocumentRestorerNet
 
 
 # ============================================================
-# Perceptual Loss (VGG-16)
+# Perceptual Loss (VGG-16) — reduced influence
 # ============================================================
 class PerceptualLoss(nn.Module):
     """Compares high-level VGG features instead of raw pixels."""
@@ -98,7 +102,10 @@ def dataset_sampling_weights(dataset) -> torch.Tensor:
         weights = []
         for child in dataset.datasets:
             child_weights = dataset_sampling_weights(child)
-            weights.append(child_weights / child_weights.sum().clamp_min(1e-12))
+            root_mass = len(child) ** 0.5
+            if isinstance(child, IdentityDocumentDataset):
+                root_mass *= 8.0  # v3: Strong boost for identity (target 20-30% effective sampling)
+            weights.append(child_weights / child_weights.sum().clamp_min(1e-12) * root_mass)
         return torch.cat(weights)
     return torch.ones(len(dataset), dtype=torch.double)
 
@@ -179,22 +186,28 @@ def parse_args():
     parser.add_argument('--max-train-samples', type=int)
     parser.add_argument('--max-validation-samples', type=int)
     parser.add_argument('--device', choices=['auto', 'cpu', 'cuda'], default='auto')
-    parser.add_argument('--perceptual-weight', type=float, default=0.05,
-                        help='Weight for VGG perceptual loss')
-    parser.add_argument('--ssim-weight', type=float, default=0.1,
-                        help='Weight for SSIM loss')
-    parser.add_argument('--shadow-loss-weight', type=float, default=1.8,
-                        help='Weight for shadow-region reconstruction loss')
-    parser.add_argument('--illumination-weight', type=float, default=0.55,
-                        help='Weight for shadow-region luminance recovery')
-    parser.add_argument('--mask-loss-weight', type=float, default=0.35,
+    parser.add_argument('--perceptual-weight', type=float, default=0.01,
+                        help='Weight for VGG perceptual loss (v3: reduced to prevent texture fabrication)')
+    parser.add_argument('--ssim-weight', type=float, default=0.25,
+                        help='Weight for SSIM loss (v3: increased for structural preservation)')
+    parser.add_argument('--shadow-loss-weight', type=float, default=1.0,
+                        help='Weight for shadow-region reconstruction loss (v3: reduced to prevent halos)')
+    parser.add_argument('--illumination-weight', type=float, default=0.10,
+                        help='Weight for shadow-region luminance recovery (v3: reduced to prevent over-brightening)')
+    parser.add_argument('--mask-loss-weight', type=float, default=0.25,
                         help='Weight for shadow mask supervision')
-    parser.add_argument('--gradient-weight', type=float, default=0.15,
-                        help='Weight for edge/gradient consistency loss')
-    parser.add_argument('--color-weight', type=float, default=0.08,
-                        help='Weight for global color consistency loss')
-    parser.add_argument('--identity-weight', type=float, default=0.12,
-                        help='Weight for non-shadow identity preservation')
+    parser.add_argument('--gradient-weight', type=float, default=0.05,
+                        help='Weight for edge/gradient consistency loss (v3: reduced to prevent edge artifacts)')
+    parser.add_argument('--color-weight', type=float, default=0.15,
+                        help='Weight for global color consistency loss (v3: increased)')
+    parser.add_argument('--color-preservation-weight', type=float, default=0.8,
+                        help='Weight for color preservation loss (v3: increased for stamp/meterai)')
+    parser.add_argument('--text-weight', type=float, default=0.2,
+                        help='Weight for text edge preservation loss (v3: reduced to prevent over-sharpening)')
+    parser.add_argument('--identity-weight', type=float, default=1.0,
+                        help='Weight for non-shadow identity preservation (v3: strongly increased)')
+    parser.add_argument('--non-shadow-weight', type=float, default=0.5,
+                        help='Weight for non-shadow region consistency (v3: new loss term)')
     parser.add_argument('--warmup-epochs', type=int, default=3,
                         help='Linear LR warmup epochs before cosine decay')
     return parser.parse_args()
@@ -214,6 +227,12 @@ def gradient_loss(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
 def weighted_l1(pred: torch.Tensor, target: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
     return (torch.abs(pred - target) * weight).sum() / (weight.sum() * pred.shape[1]).clamp_min(1.0)
 
+def weighted_charbonnier(pred: torch.Tensor, target: torch.Tensor, weight: torch.Tensor, eps: float = 1e-3) -> torch.Tensor:
+    """Charbonnier loss (smooth L1 variant) with spatial weighting. More stable than L1 for small errors."""
+    diff = pred - target
+    loss = torch.sqrt(diff * diff + eps * eps)
+    return (loss * weight).sum() / (weight.sum() * pred.shape[1]).clamp_min(1.0)
+
 def dice_loss(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     pred = pred.clamp(0, 1)
     target = target.clamp(0, 1)
@@ -222,12 +241,56 @@ def dice_loss(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     return (1.0 - (2.0 * intersection + 1.0) / (denominator + 1.0)).mean()
 
 
-class LossComputer:
-    """Computes all loss terms and returns a weighted sum."""
+def rgb_to_hsv_torch(rgb):
+    r, g, b = rgb[:, 0:1], rgb[:, 1:2], rgb[:, 2:3]
+    max_c = torch.max(rgb, dim=1, keepdim=True)[0]
+    min_c = torch.min(rgb, dim=1, keepdim=True)[0]
+    diff = max_c - min_c
+    hue = torch.zeros_like(r)
+    mask = (diff > 1e-6)
+    r_mask = (max_c == r) & mask
+    g_mask = (max_c == g) & mask
+    b_mask = (max_c == b) & mask
+    hue[r_mask] = (((g[r_mask] - b[r_mask]) / diff[r_mask]) % 6) / 6
+    hue[g_mask] = (((b[g_mask] - r[g_mask]) / diff[g_mask]) + 2) / 6
+    hue[b_mask] = (((r[b_mask] - g[b_mask]) / diff[b_mask]) + 4) / 6
+    sat = torch.zeros_like(r)
+    sat[mask] = diff[mask] / (max_c[mask] + 1e-6)
+    val = max_c
+    return torch.cat([hue, sat, val], dim=1)
 
-    def __init__(self, perceptual_weight=0.05, ssim_weight=0.1, shadow_loss_weight=1.25,
-                 illumination_weight=0.35, mask_loss_weight=0.2, gradient_weight=0.15,
-                 color_weight=0.08, identity_weight=0.25, device='cpu'):
+def color_preservation_loss(pred, target):
+    pred_hsv = rgb_to_hsv_torch(pred)
+    target_hsv = rgb_to_hsv_torch(target)
+    hue_diff = torch.abs(pred_hsv[:, 0:1] - target_hsv[:, 0:1])
+    hue_loss = torch.min(hue_diff, 1.0 - hue_diff).mean()
+    sat_loss = torch.abs(pred_hsv[:, 1:2] - target_hsv[:, 1:2]).mean()
+    val_loss = torch.abs(pred_hsv[:, 2:3] - target_hsv[:, 2:3]).mean()
+    return hue_loss + 0.5 * sat_loss + 0.3 * val_loss
+
+def text_preservation_loss(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    """Detect text edges using Laplacian filter on target (luminance)."""
+    luma_target = 0.299 * target[:, 0:1] + 0.587 * target[:, 1:2] + 0.114 * target[:, 2:3]
+    kernel = torch.tensor([[0, 1, 0], [1, -4, 1], [0, 1, 0]], dtype=torch.float32, device=target.device).view(1, 1, 3, 3)
+    laplacian = F.conv2d(luma_target, kernel, padding=1)
+    # v3: lower threshold (0.04) to catch thinner text strokes
+    text_mask = (torch.abs(laplacian) > 0.04).float()
+    total_pixels = text_mask.sum().clamp_min(1.0)
+    return (torch.abs(pred - target) * text_mask).sum() / (total_pixels * pred.shape[1])
+
+
+class LossComputer:
+    """Computes all loss terms and returns a weighted sum.
+
+    v3: Simplified, less aggressive loss balance.
+    Focus: (1) Charbonnier reconstruction, (2) SSIM structure,
+    (3) Strong identity preservation, (4) Color preservation.
+    """
+
+    def __init__(self, perceptual_weight=0.01, ssim_weight=0.25, shadow_loss_weight=1.0,
+                 illumination_weight=0.10, mask_loss_weight=0.25, gradient_weight=0.05,
+                 color_weight=0.15, identity_weight=1.0, color_preservation_weight=0.8,
+                 text_weight=0.2, non_shadow_weight=0.5, device='cpu'):
         self.perceptual_weight = perceptual_weight
         self.ssim_weight = ssim_weight
         self.shadow_loss_weight = shadow_loss_weight
@@ -236,17 +299,21 @@ class LossComputer:
         self.gradient_weight = gradient_weight
         self.color_weight = color_weight
         self.identity_weight = identity_weight
-        self.perceptual = PerceptualLoss().to(device)
+        self.color_preservation_weight = color_preservation_weight
+        self.text_weight = text_weight
+        self.non_shadow_weight = non_shadow_weight
+        self.perceptual = PerceptualLoss().to(device) if perceptual_weight > 0 else None
 
     def __call__(self, restored, predicted_mask, target, mask, include_tv, source=None):
-        # 1. Pixel-level reconstruction
-        reconstruction = F.l1_loss(restored, target)
+        # 1. Charbonnier reconstruction (smooth, fewer artifacts than L1)
+        charb_eps = 1e-3
+        reconstruction = torch.mean(torch.sqrt((restored - target) ** 2 + charb_eps ** 2))
 
-        # 2. Shadow-weighted L1 (penalize shadow regions harder)
-        shadow_weight = 1.0 + mask * 8.0
-        shadow_loss = weighted_l1(restored, target, shadow_weight)
+        # 2. Shadow-weighted Charbonnier (moderate — v3: reduced from 8x to 3x)
+        shadow_weight = 1.0 + mask * 3.0
+        shadow_loss = weighted_charbonnier(restored, target, shadow_weight)
 
-        # 3. Luminance recovery in shadow regions
+        # 3. Luminance recovery in shadow regions (reduced)
         luminance_weights = restored.new_tensor([0.299, 0.587, 0.114]).view(1, 3, 1, 1)
         restored_luma = (restored * luminance_weights).sum(dim=1, keepdim=True)
         target_luma = (target * luminance_weights).sum(dim=1, keepdim=True)
@@ -266,22 +333,42 @@ class LossComputer:
 
         mask_tv = total_variation(predicted_mask) if include_tv else torch.tensor(0.0, device=restored.device)
 
-        # 5. Perceptual (VGG) loss — visual quality
-        perceptual = self.perceptual(restored, target) if self.perceptual_weight > 0 else torch.tensor(0.0, device=restored.device)
+        # 5. Perceptual (VGG) loss — v3: very low to prevent texture fabrication
+        perceptual = self.perceptual(restored, target) if self.perceptual is not None else torch.tensor(0.0, device=restored.device)
 
-        # 6. SSIM loss — structural similarity
+        # 6. SSIM loss — v3: high weight for structural preservation
         ssim = ssim_loss(restored, target) if self.ssim_weight > 0 else torch.tensor(0.0, device=restored.device)
 
         # 7. Total variation — smoothness
         tv = total_variation(restored) if include_tv else torch.tensor(0.0, device=restored.device)
 
+        # 8. Gradient consistency — v3: reduced
         gradients = gradient_loss(restored, target) if self.gradient_weight > 0 else torch.tensor(0.0, device=restored.device)
+
+        # 9. Color consistency — global
         color_consistency = F.l1_loss(restored.mean(dim=(2, 3)), target.mean(dim=(2, 3))) if self.color_weight > 0 else torch.tensor(0.0, device=restored.device)
+
+        # 10. Identity preservation — v3: STRONG, non-shadow regions must not change
         if source is not None and self.identity_weight > 0:
             non_shadow = (1.0 - mask).clamp(0, 1)
-            identity = weighted_l1(restored, source, non_shadow)
+            identity = weighted_charbonnier(restored, source, non_shadow)
         else:
             identity = torch.tensor(0.0, device=restored.device)
+
+        # 11. Non-shadow consistency — v3: NEW, penalize ANY pixel change outside shadow
+        if source is not None and self.non_shadow_weight > 0:
+            non_shadow = (1.0 - mask).clamp(0, 1)
+            # Use source and target to define "should not change" region
+            # Non-shadow areas: source ≈ target, so restored should also ≈ source
+            non_shadow_change = (torch.abs(restored - source) * non_shadow).sum() / (non_shadow.sum() * restored.shape[1]).clamp_min(1.0)
+        else:
+            non_shadow_change = torch.tensor(0.0, device=restored.device)
+
+        # 12. Color preservation — v3: HIGH, stamps/meterai must keep color
+        color_pres = color_preservation_loss(restored, target) if self.color_preservation_weight > 0 else torch.tensor(0.0, device=restored.device)
+
+        # 13. Text preservation — v3: moderate
+        text_pres = text_preservation_loss(restored, target) if self.text_weight > 0 else torch.tensor(0.0, device=restored.device)
 
         total = (reconstruction
                  + self.shadow_loss_weight * shadow_loss
@@ -292,7 +379,10 @@ class LossComputer:
                  + self.gradient_weight * gradients
                  + self.color_weight * color_consistency
                  + self.identity_weight * identity
-                 + 0.02 * tv
+                 + self.non_shadow_weight * non_shadow_change
+                 + self.color_preservation_weight * color_pres
+                 + self.text_weight * text_pres
+                 + 0.03 * tv
                  + 0.01 * mask_tv)
 
         return total, reconstruction, shadow_loss
@@ -401,6 +491,9 @@ def main():
         gradient_weight=args.gradient_weight,
         color_weight=args.color_weight,
         identity_weight=args.identity_weight,
+        color_preservation_weight=args.color_preservation_weight,
+        text_weight=args.text_weight,
+        non_shadow_weight=args.non_shadow_weight,
         device=device,
     )
 
@@ -444,6 +537,7 @@ def main():
     print(f'paired_roots={len(train_paired_roots)} clean_roots={len(clean_roots)} identity_roots={len(identity_roots)}')
     print('sampling=balanced_by_dataset_root replacement=true')
     print(f'perceptual_weight={args.perceptual_weight} ssim_weight={args.ssim_weight} lr={args.lr}')
+    print(f'identity_weight={args.identity_weight} non_shadow_weight={args.non_shadow_weight} color_preservation_weight={args.color_preservation_weight}')
 
     epoch_times = []
     epochs_without_improvement = 0

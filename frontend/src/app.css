@@ -36,3 +36,96 @@ img { max-width: 100%; }
 }
 @keyframes spin { to { transform: rotate(360deg); } }
 .spinner { width: 24px; height: 24px; border: 3px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.8s linear infinite; }
+
+
+/* DocAI Premium UI — Linear-inspired, mobile-first */
+:root {
+  --primary: #5e6ad2;
+  --bg: #08090a;
+  --bg2: #0f1011;
+  --bg3: rgba(255,255,255,.025);
+  --surface: rgba(255,255,255,.045);
+  --border: rgba(255,255,255,.085);
+  --text: #f7f8f8;
+  --text2: #aeb4bd;
+  --text3: #70757e;
+  --accent: #7170ff;
+  --accent2: #9290ff;
+  --gradient-1: linear-gradient(135deg,#5e6ad2,#7170ff);
+  --radius: 12px;
+  --radius-sm: 10px;
+  --radius-xs: 7px;
+}
+html { color-scheme: dark; background: var(--bg); }
+body { overflow-x: hidden; letter-spacing: -.01em; font-feature-settings: "cv01","ss03"; }
+button, input, select, textarea { font: inherit; }
+button, select, input[type=file] { min-height: 42px; }
+button:focus-visible, a:focus-visible, select:focus-visible, input:focus-visible {
+  outline: 2px solid var(--accent); outline-offset: 2px;
+}
+select {
+  color-scheme: dark; background-color: #111216 !important; border-color: var(--border) !important;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.025); text-overflow: ellipsis;
+}
+option, optgroup { background: #111216; color: var(--text); }
+.bg-grid {
+  background-image:
+    radial-gradient(ellipse 65% 45% at 50% -10%, rgba(113,112,255,.11), transparent 70%),
+    radial-gradient(circle at 1px 1px, rgba(255,255,255,.025) 1px, transparent 0);
+  background-size: auto, 32px 32px;
+}
+.page-header { margin: 0 0 1.75rem !important; }
+.page-header h1 { font-size: clamp(1.55rem, 3vw, 2.15rem) !important; font-weight: 590 !important; letter-spacing: -.045em; }
+.page-header p { max-width: 720px; color: var(--text2) !important; line-height: 1.6; }
+.card, .stat-card, .result-box, .img-box {
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.025), 0 1px 2px rgba(0,0,0,.25);
+}
+.card { background: rgba(255,255,255,.024) !important; border-color: var(--border) !important; }
+.stat-card { background: rgba(255,255,255,.022) !important; border-color: var(--border) !important; }
+.btn-primary {
+  background: linear-gradient(180deg,#6d72dd,#555fc7) !important;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.18), 0 6px 18px rgba(65,75,190,.22);
+}
+.btn-primary:hover:not(:disabled) { filter: brightness(1.1); transform: translateY(-1px); }
+.info-text { line-height: 1.45; overflow-wrap: anywhere; }
+.model-select select { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.upload-zone { background: rgba(255,255,255,.012); }
+.upload-zone:hover { background: rgba(113,112,255,.055) !important; border-color: rgba(130,143,255,.6) !important; }
+img { height: auto; }
+@media (prefers-reduced-motion: no-preference) {
+  button, a, .card, .stat-card, .upload-zone { transition: color .16s, background .16s, border-color .16s, transform .16s, filter .16s; }
+}
+@media (max-width: 768px) {
+  body { font-size: 15px; }
+  .page-header { margin-bottom: 1.15rem !important; }
+  .card { padding: 1rem !important; border-radius: 10px !important; }
+  .stats { grid-template-columns: repeat(2,minmax(0,1fr)) !important; gap: .65rem !important; }
+  .stat-card { padding: .85rem !important; min-width: 0; }
+  .stat-card .value { font-size: .92rem !important; overflow-wrap: anywhere; }
+  .model-select select { width: 100%; font-size: 16px !important; }
+  .process-bar { align-items: stretch !important; flex-wrap: wrap; }
+  .process-bar .btn { flex: 1 1 auto; justify-content: center; min-height: 46px; }
+  .process-info { width: 100%; margin-left: 0 !important; overflow-wrap: anywhere; }
+}
+@media (max-width: 430px) {
+  .stats { grid-template-columns: 1fr 1fr !important; }
+  .mode-grid { grid-template-columns: repeat(2,minmax(0,1fr)) !important; }
+  .mode-btn { min-width: 0; padding: .72rem .62rem !important; }
+  .upload-zone { padding: 1.35rem .85rem !important; }
+}
+
+
+/* Cross-page responsive polish */
+@media (hover:hover) {
+  .card:hover, .stat-card:hover { border-color: rgba(255,255,255,.12) !important; }
+}
+@media (max-width:900px) {
+  .grid-2 { grid-template-columns:1fr !important; }
+}
+@media (max-width:600px) {
+  input, select, textarea { font-size:16px !important; }
+  .btn { min-height:44px; }
+  .page-header { display:flex; flex-direction:column; align-items:flex-start !important; gap:.75rem; }
+  .header-badges { width:100%; display:flex; flex-wrap:wrap; }
+  .badge { min-height:34px; }
+}

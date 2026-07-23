@@ -19,6 +19,11 @@
   let selectedCheckpoint = 'checkpoints/document_restorer/best.pth'
   let resumeCheckpoint = 'checkpoints/document_restorer/best.pth'
   let resumeMode = 'weights'
+  let identityFiles = []
+  let uploadingIdentity = false
+  let identityDragActive = false
+  let identityUploadProgress = ''
+  $: identityTotalSize = identityFiles.reduce((sum, file) => sum + file.size, 0)
 
   const serverPresets = [
     { id: 'balanced', name: 'Balanced L4', note: 'Baseline kuat: semua paired dataset, mask supervised, size 768.', epochs: 80, batchSize: 4, size: 768, lr: 0.0001, workers: 12, perceptualWeight: 0.05, ssimWeight: 0.1, shadowLossWeight: 1.8, illuminationWeight: 0.55, maskLossWeight: 0.35, gradientWeight: 0.15, colorWeight: 0.08, identityWeight: 0.12, earlyStopPatience: 10, minDelta: 0.0001, gradClipNorm: 1.0, resumeBest: false },
@@ -33,6 +38,26 @@
   $: vramLevel = estimatedVram > vramTotal * 0.92 ? 'danger' : estimatedVram > vramTotal * 0.75 ? 'warning' : 'safe'
   $: validationDatasets = selectedDatasets.map(path => validationPathFor(path)).filter(Boolean)
   $: displayProgress = Number(status.progress_percent ?? ((status.current_epoch / status.total_epochs) * 100) ?? 0)
+  $: selectedRunMode = !config.resumeBest ? 'train' : resumeMode === 'weights' ? 'fine_tune' : 'resume'
+  $: activeRunMode = status.training_mode || 'train'
+  $: activeRunLabel = activeRunMode === 'fine_tune' ? 'Fine-tuning' : activeRunMode === 'resume' ? 'Resume Training' : 'Training Baru'
+  $: activeConfig = status.run_config || parseRunCommand(status.run_command || [])
+
+  function parseRunCommand(command) {
+    const value = (flag, fallback = null) => {
+      const index = command.indexOf(flag)
+      return index >= 0 && index + 1 < command.length ? command[index + 1] : fallback
+    }
+    if (!command.length) return null
+    return {
+      mode: command.includes('--resume-weights-only') ? 'fine_tune' : command.includes('--resume') ? 'resume' : 'train',
+      epochs: value('--epochs'), batch_size: value('--batch-size'), size: value('--size'),
+      lr: value('--lr'), base_channels: value('--base-channels'), workers: value('--workers'),
+      device: value('--device'), early_stop_patience: value('--early-stop-patience'),
+      grad_clip_norm: value('--grad-clip-norm'), identity_weight: value('--identity-weight'),
+      resume: value('--resume')
+    }
+  }
 
   onMount(async () => {
     refreshIcons()
@@ -57,13 +82,58 @@
     if (statusTimer) clearInterval(statusTimer)
   })
 
-  async function loadDatasets() {
+  async function loadDatasets(selectIdentity = false) {
     try {
       const d = await apiJson('/api/datasets')
       datasets = d.datasets || []
-      // Auto-select all paired datasets
-      selectedDatasets = datasets.filter(ds => ds.kind === 'paired' && ds.ready).map(ds => ds.path)
+      const available = new Set(datasets.map(ds => ds.path))
+      const preserved = selectedDatasets.filter(path => available.has(path))
+      const defaults = datasets.filter(ds => ds.kind === 'paired' && ds.ready).map(ds => ds.path)
+      const identity = selectIdentity ? datasets.filter(ds => ds.kind === 'identity' && ds.ready).map(ds => ds.path) : []
+      selectedDatasets = [...new Set([...preserved, ...defaults, ...identity])]
     } catch(e) {}
+  }
+
+  function addIdentityFiles(files) {
+    const images = Array.from(files || []).filter(file => file.type.startsWith('image/'))
+    const existing = new Set(identityFiles.map(file => `${file.name}:${file.size}:${file.lastModified}`))
+    identityFiles = [...identityFiles, ...images.filter(file => !existing.has(`${file.name}:${file.size}:${file.lastModified}`))].slice(0, 500)
+  }
+
+  function dropIdentity(event) {
+    event.preventDefault()
+    identityDragActive = false
+    if (!training && !uploadingIdentity) addIdentityFiles(event.dataTransfer?.files)
+  }
+
+  async function uploadIdentity() {
+    if (!identityFiles.length || training) return
+    uploadingIdentity = true
+    try {
+      const token = localStorage.getItem('docai_token')
+      let savedCount = 0
+      let errorCount = 0
+      const batches = []
+      for (let index = 0; index < identityFiles.length; index += 50) batches.push(identityFiles.slice(index, index + 50))
+      for (let index = 0; index < batches.length; index++) {
+        identityUploadProgress = `Batch ${index + 1}/${batches.length}`
+        const formData = new FormData()
+        for (const file of batches[index]) formData.append('files', file)
+        const response = await fetch('/api/datasets/identity/upload', {
+          method: 'POST', headers: { Authorization: `Bearer ${token}` }, body: formData
+        })
+        const data = await response.json().catch(() => ({}))
+        if (!response.ok) throw new Error(typeof data.detail === 'string' ? data.detail : data.detail?.message || `Upload batch ${index + 1} gagal`)
+        savedCount += data.saved_count || 0
+        errorCount += data.errors?.length || 0
+      }
+      identityFiles = []
+      const input = document.getElementById('identityUpload')
+      if (input) input.value = ''
+      await loadDatasets(true)
+      showToast(`${savedCount} identity images uploaded${errorCount ? ` · ${errorCount} gagal` : ''}`)
+    } catch(e) { showToast(e.message, 'error') }
+    finally { uploadingIdentity = false; identityUploadProgress = '' }
   }
 
   async function refreshStatus() {
@@ -347,7 +417,7 @@
       <span class="badge success"><i data-lucide="check-circle"></i> Model Ready</span>
     {/if}
     {#if training}
-      <span class="badge warning"><i data-lucide="activity"></i> Training Running</span>
+      <span class="badge warning run-mode {activeRunMode}"><i data-lucide="activity"></i> {activeRunLabel} Running</span>
     {/if}
   </div>
 </div>
@@ -380,6 +450,28 @@
           <span class="guide-item"><strong>clean</strong>: hanya gambar bersih. Model membuat degradasi sintetis otomatis.</span>
           <span class="guide-item"><strong>identity</strong>: input=target bersih. Jaga warna asli area non-shadow. Cocok untuk 20–100 gambar bersihmu sendiri.</span>
           <span class="guide-item">Kalau belum ada identity, tidak masalah; fokus dulu ke semua paired.</span>
+        </div>
+        <div class="identity-upload" class:drag-active={identityDragActive}
+          ondragover={event => { event.preventDefault(); if (!training) identityDragActive = true }}
+          ondragleave={() => identityDragActive = false}
+          ondrop={dropIdentity}>
+          <div>
+            <strong>Upload Identity Clean</strong>
+            <span>Drag & drop banyak gambar di sini, atau pilih file. Disimpan ke <code>data/identity/</code>.</span>
+            {#if identityFiles.length}
+              <span class="queue-info">{identityFiles.length} file · {(identityTotalSize / 1048576).toFixed(1)} MB {identityUploadProgress ? `· ${identityUploadProgress}` : ''}</span>
+            {/if}
+          </div>
+          <input id="identityUpload" type="file" accept="image/*" multiple disabled={training || uploadingIdentity}
+            onchange={event => addIdentityFiles(event.target.files)} />
+          {#if identityFiles.length && !uploadingIdentity}
+            <button class="btn btn-outline" type="button" onclick={() => { identityFiles = []; document.getElementById('identityUpload').value = '' }}>Clear</button>
+          {/if}
+          <button class="btn btn-outline" type="button" onclick={uploadIdentity}
+            disabled={!identityFiles.length || training || uploadingIdentity}>
+            <i data-lucide="upload"></i>
+            {uploadingIdentity ? 'Uploading...' : `Upload ${identityFiles.length || ''}`}
+          </button>
         </div>
         <div class="dataset-list">
           {#each datasets as ds}
@@ -511,7 +603,7 @@
 
       <label class="check-row">
         <input type="checkbox" bind:checked={config.resumeBest} disabled={!status.best_exists} />
-        <span>Fine-tune dari `best.pth` dengan optimizer/LR baru</span>
+        <span>Gunakan checkpoint sebagai sumber (Fine-tuning atau Resume)</span>
       </label>
       {#if config.resumeBest}
         <div class="field">
@@ -564,7 +656,7 @@
           </button>
         {:else}
           <button class="btn btn-primary" onclick={startTraining} disabled={selectedDatasets.length === 0}>
-            <i data-lucide="play"></i> Start Training
+            <i data-lucide="play"></i> {selectedRunMode === 'fine_tune' ? 'Start Fine-tuning' : selectedRunMode === 'resume' ? 'Resume Training' : 'Start Training Baru'}
           </button>
         {/if}
       </div>
@@ -611,7 +703,7 @@
         {#if status.started_at_wib}
           <div class="status-item">
             <span class="k">Jenis Run</span>
-            <span class="v time-text">{status.process_kind || 'training'}</span>
+            <span class="v run-type {activeRunMode}">{activeRunLabel}</span>
           </div>
           <div class="status-item">
             <span class="k">Mulai Run</span>
@@ -651,6 +743,33 @@
           <span class="v">{status.best_exists ? 'best.pth ✓' : '—'}</span>
         </div>
       </div>
+
+      {#if training && activeConfig}
+        <div class="active-config">
+          <div class="active-config-head">
+            <div>
+              <span class="eyebrow">KONFIGURASI YANG SEDANG BERJALAN</span>
+              <strong>{activeRunLabel}</strong>
+            </div>
+            <span class="mode-pill {activeRunMode}">{activeRunMode === 'fine_tune' ? 'WEIGHTS ONLY' : activeRunMode === 'resume' ? 'FULL STATE' : 'FROM SCRATCH'}</span>
+          </div>
+          <div class="config-grid">
+            <div><span>Epoch</span><strong>{activeConfig.epochs ?? '—'}</strong></div>
+            <div><span>Batch</span><strong>{activeConfig.batch_size ?? '—'}</strong></div>
+            <div><span>Image</span><strong>{activeConfig.size ? `${activeConfig.size}px` : '—'}</strong></div>
+            <div><span>Learning rate</span><strong>{activeConfig.lr ?? '—'}</strong></div>
+            <div><span>Base channels</span><strong>{activeConfig.base_channels ?? '—'}</strong></div>
+            <div><span>Workers</span><strong>{activeConfig.workers ?? '—'}</strong></div>
+            <div><span>Device</span><strong>{activeConfig.device ?? '—'}</strong></div>
+            <div><span>Early stop</span><strong>{activeConfig.early_stop_patience ?? '—'}</strong></div>
+            <div><span>Grad clip</span><strong>{activeConfig.grad_clip_norm ?? '—'}</strong></div>
+            <div><span>Identity weight</span><strong>{activeConfig.identity_weight ?? '—'}</strong></div>
+          </div>
+          {#if activeConfig.resume}
+            <div class="resume-source"><span>Sumber checkpoint</span><code>{activeConfig.resume}</code></div>
+          {/if}
+        </div>
+      {/if}
 
       {#if status.model_available_for_test}
         <div class="model-actions">
@@ -814,7 +933,7 @@
 <div class="footer">DocAI v2.0 — Document Restoration Training</div>
 
 <style>
-  .page-header { display: flex; align-items: flex-start; justify-content: space-between; margin-bottom: 2rem; }
+  .page-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; margin-bottom: 1.5rem; flex-wrap: wrap; max-width: 100%; }
   .page-header h1 { font-size: 1.5rem; font-weight: 700; }
   .page-header p { color: var(--text2); margin-top: 0.25rem; font-size: 0.9rem; }
   .header-badges { display: flex; gap: 0.5rem; }
@@ -827,7 +946,7 @@
   .form-group { margin-bottom: 1rem; }
   .form-group label { display: flex; align-items: center; gap: 0.5rem; font-size: 0.75rem; font-weight: 700; color: var(--text2); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.375rem; }
   .form-group .hint { font-weight: 400; text-transform: none; letter-spacing: 0; color: var(--text3); font-size: 0.7rem; }
-  .form-group input, .form-group select { width: 100%; padding: 0.625rem 0.75rem; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-xs); color: var(--text); font-family: inherit; font-size: 0.85rem; }
+  .form-group input, .form-group select, .field select { width: 100%; min-width: 0; padding: 0.625rem 0.75rem; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-xs); color: var(--text); font-family: inherit; font-size: 0.85rem; box-sizing: border-box; }
   .form-group input:focus, .form-group select:focus { outline: none; border-color: var(--accent); }
   .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
 
@@ -862,6 +981,14 @@
   .ds-badge.paired { background: rgba(16,185,129,0.15); color: var(--success); }
   .ds-badge.clean { background: rgba(99,102,241,0.15); color: var(--primary); }
   .ds-badge.identity { background: rgba(245,158,11,0.15); color: var(--warning); }
+  .identity-upload { display: grid; grid-template-columns: minmax(220px, 1fr) minmax(220px, 1fr) auto; gap: 0.75rem; align-items: center; padding: 0.9rem; margin-bottom: 0.75rem; border: 1px dashed var(--border); border-radius: var(--radius-xs); background: var(--bg); }
+  .identity-upload.drag-active { border-color: var(--accent); background: rgba(6,182,212,0.08); box-shadow: inset 0 0 0 1px var(--accent); }
+  .identity-upload strong, .identity-upload span { display: block; }
+  .identity-upload span { margin-top: 0.2rem; color: var(--text2); font-size: 0.75rem; }
+  .identity-upload input { min-width: 0; font-size: 0.78rem; color: var(--text2); }
+  .identity-upload code { color: var(--accent2); }
+  .identity-upload .queue-info { color: var(--success); font-weight: 600; }
+  @media (max-width: 900px) { .identity-upload { grid-template-columns: 1fr; } }
   .ds-badge.unknown { background: rgba(113,113,122,0.15); color: var(--text3); }
   .empty-datasets { padding: 2rem; text-align: center; color: var(--text3); font-size: 0.85rem; }
   .ds-summary { margin-top: 0.5rem; font-size: 0.75rem; color: var(--text2); text-align: right; }
@@ -934,9 +1061,69 @@
 
   .footer { text-align: center; padding: 2rem 0; color: var(--text3); font-size: 0.8rem; }
 
-  @media (max-width: 768px) {
+  @media (max-width: 1024px) {
     .grid-2 { grid-template-columns: 1fr; }
+    .log-card { height: auto; min-height: 0; }
+  }
+  @media (max-width: 900px) {
+    .status-grid, .monitor-grid, .gpu-bars { grid-template-columns: 1fr; }
+    .model-actions { flex-direction: column; align-items: stretch; }
+    .model-actions .btn { justify-content: center; }
+    .chart-wrap { padding: 0.75rem; }
+    .identity-upload { grid-template-columns: 1fr; }
+  }
+  @media (max-width: 768px) {
     .form-row, .eval-grid { grid-template-columns: 1fr; }
     .preset-grid { grid-template-columns: 1fr; }
+    .page-header { margin-bottom: 1rem; }
+    .page-header h1 { font-size: 1.25rem; }
+    .page-header p { font-size: 0.85rem; }
+    .card { padding: 1rem; margin-bottom: 1rem; border-radius: 12px; }
+    .dataset-list { max-height: 240px; }
+    .log-box { max-height: 55vh; white-space: normal; word-break: break-word; }
+    .footer { padding: 1.5rem 0; }
+  }
+  @media (max-width: 520px) {
+    .page-header { flex-direction: column; gap: 0.5rem; align-items: flex-start; }
+    .header-badges { width: 100%; overflow-x: auto; scrollbar-width: none; padding-bottom: 0.25rem; }
+    .server-advice { flex-direction: column; align-items: flex-start; gap: 0.35rem; }
+    .badge { white-space: nowrap; }
+  }
+
+  .run-type { font-size:.9rem !important; display:inline-flex; padding:.28rem .55rem; border-radius:999px; }
+  .run-type.fine_tune,.mode-pill.fine_tune { color:#c4b5fd; background:rgba(139,92,246,.12); }
+  .run-type.resume,.mode-pill.resume { color:#7dd3fc; background:rgba(14,165,233,.12); }
+  .run-type.train,.mode-pill.train { color:#86efac; background:rgba(34,197,94,.12); }
+  .active-config { margin-top:1rem; padding:1rem; background:linear-gradient(145deg,rgba(113,112,255,.07),rgba(255,255,255,.018)); border:1px solid rgba(130,143,255,.18); border-radius:var(--radius-sm); }
+  .active-config-head { display:flex; align-items:flex-start; justify-content:space-between; gap:1rem; margin-bottom:.85rem; }
+  .active-config-head>div { display:grid; gap:.25rem; }
+  .active-config .eyebrow { font-size:.63rem; color:var(--text3); letter-spacing:.08em; }
+  .active-config-head strong { font-size:1rem; }
+  .mode-pill { padding:.3rem .55rem; border-radius:999px; font-size:.62rem; font-weight:700; letter-spacing:.06em; white-space:nowrap; }
+  .config-grid { display:grid; grid-template-columns:repeat(5,minmax(0,1fr)); gap:.55rem; }
+  .config-grid>div { min-width:0; padding:.65rem; background:rgba(0,0,0,.18); border:1px solid var(--border); border-radius:7px; display:grid; gap:.25rem; }
+  .config-grid span,.resume-source span { color:var(--text3); font-size:.65rem; text-transform:uppercase; }
+  .config-grid strong { font-size:.84rem; overflow-wrap:anywhere; }
+  .resume-source { margin-top:.7rem; display:grid; gap:.3rem; }
+  .resume-source code { color:var(--text2); font-size:.72rem; overflow-wrap:anywhere; }
+  @media(max-width:900px){.config-grid{grid-template-columns:repeat(3,minmax(0,1fr))}}
+  @media(max-width:600px){.config-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.active-config-head{align-items:flex-start}.status-grid{grid-template-columns:1fr}.status-item.wide{grid-column:auto}}
+
+  /* Premium responsive overrides */
+  .grid-2 { align-items:start; }
+  .card { background:rgba(255,255,255,.022); }
+  .preset-card { min-height:104px; text-align:left; background:rgba(255,255,255,.018); border-color:var(--border); }
+  .preset-card.active { background:rgba(113,112,255,.09); border-color:rgba(130,143,255,.5); box-shadow:inset 0 0 0 1px rgba(130,143,255,.1); }
+  .form-group input,.form-group select,.field select { min-height:44px; border-radius:7px; background:#111216; border:1px solid var(--border); color:var(--text); }
+  .dataset-option { min-width:0; }
+  .dataset-option * { overflow-wrap:anywhere; }
+  .log-box { max-height:420px; min-height:220px; word-break:normal; overflow-wrap:anywhere; line-height:1.55; }
+  @media(max-width:900px){
+    .grid-2{grid-template-columns:1fr}.preset-grid{grid-template-columns:repeat(3,minmax(0,1fr))}.monitor-grid{grid-template-columns:1fr 1fr}
+  }
+  @media(max-width:650px){
+    .preset-grid{display:flex;overflow-x:auto;scroll-snap-type:x mandatory;padding-bottom:.35rem}.preset-card{flex:0 0 82%;scroll-snap-align:start}
+    .form-row,.eval-grid,.monitor-grid{grid-template-columns:1fr}.form-actions{position:sticky;bottom:.6rem;z-index:10;padding:.55rem;background:rgba(8,9,10,.9);backdrop-filter:blur(14px);border:1px solid var(--border);border-radius:10px}.form-actions .btn{width:100%;justify-content:center}
+    .identity-upload{padding:.85rem}.dataset-option{padding:.75rem}.log-box{font-size:.68rem;max-height:52vh}.model-actions{display:grid;grid-template-columns:1fr}.model-actions .btn{width:100%;justify-content:center}
   }
 </style>

@@ -564,4 +564,17 @@
   @media (max-width: 1100px) { .analysis-grid { grid-template-columns: 1fr 1fr; } }
   @media (max-width: 900px) { .layout { grid-template-columns: 1fr; } .content { padding: 1rem; } }
   @media (max-width: 768px) { .page-header { margin-bottom: 1rem; } .page-header h1 { font-size: 1.25rem; } .tabs { position: sticky; top: 0; z-index: 5; background: var(--bg); margin-left: -0.25rem; margin-right: -0.25rem; padding: 0.25rem; } .tabs button { flex: 1 0 auto; justify-content: center; } .contact-sheet-card { padding: 0.75rem; } .contact-sheet-header { align-items: flex-start; flex-direction: column; } .contact-sheet-list { grid-template-columns: 1fr; } .contact-sheet-thumb { height: min(70vh, 420px); } .contact-sheet-open { width: 100%; justify-content: center; } .file-grid { grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); } .analysis-grid, .pair-card { grid-template-columns: 1fr; } .toolbar { gap: 0.35rem; } .toolbar .btn { width: 100%; justify-content: center; } .count-text { width: 100%; margin-left: 0; text-align: center; } }
+
+  /* Premium responsive overrides */
+  .analysis-card,.sidebar,.pair-card,.file-card,.contact-sheet-row { background:rgba(255,255,255,.022);border-color:var(--border); }
+  .tabs { gap:.3rem;padding:.28rem;background:rgba(255,255,255,.02);border:1px solid var(--border);border-radius:9px; }
+  .tabs button { min-height:40px;border-radius:6px; }
+  .content { min-width:0; }
+  @media(max-width:900px){
+    .sidebar{position:relative;top:auto;max-height:none;display:flex;overflow-x:auto;gap:.45rem;padding:.65rem;scrollbar-width:none}.sidebar h3{display:none}.sidebar button{flex:0 0 auto;white-space:nowrap}
+  }
+  @media(max-width:768px){
+    .tabs{position:sticky;top:66px!important;overflow-x:auto;justify-content:flex-start;scrollbar-width:none}.tabs button{flex:0 0 auto!important;padding:.65rem .8rem}.layout{gap:.75rem}.content{padding:.65rem!important;border-radius:10px}.analysis-card{padding:.85rem}.analysis-grid{grid-template-columns:1fr!important}.field input{width:100%;min-width:0}.pair-card{padding:.55rem}.pair-image img{max-height:55vh;object-fit:contain}.file-grid{grid-template-columns:repeat(2,minmax(0,1fr))!important;gap:.55rem}.delete-btn{opacity:1;width:36px;height:36px}.lightbox-overlay{padding:.5rem}.lb-img{max-width:100%;max-height:78vh}.lb-info{max-width:calc(100% - 1rem);overflow:hidden}.lb-info span:first-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  }
+  @media(max-width:390px){.file-grid{grid-template-columns:1fr 1fr!important}}
 </style>

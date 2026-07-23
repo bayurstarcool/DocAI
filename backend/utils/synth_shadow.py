@@ -133,3 +133,75 @@ def apply_document_shadow(clean_rgb, return_mask=False):
     out=(shaded*255).astype(np.uint8)
     sm=(mask*255).astype(np.uint8)
     return (out, sm) if return_mask else out
+
+
+def apply_color_temperature_shift(image, mask):
+    """Apply warm/cool color shift to shadow areas (realistic lighting)."""
+    img = image.astype(np.float32) / 255.0
+    h, w = img.shape[:2]
+    if random.random() < 0.7:
+        temp = np.array([random.uniform(1.02, 1.12), random.uniform(0.94, 1.0), random.uniform(0.88, 0.96)], dtype=np.float32)
+    else:
+        temp = np.array([random.uniform(0.92, 0.98), random.uniform(0.96, 1.02), random.uniform(1.02, 1.12)], dtype=np.float32)
+    shadow_mask = mask.astype(np.float32) / 255.0
+    shadow_mask = cv2.GaussianBlur(shadow_mask, (0, 0), 3.0)
+    shadow_mask = np.clip(shadow_mask * random.uniform(0.3, 0.7), 0, 1)
+    result = img.copy()
+    for c in range(3):
+        result[..., c] = img[..., c] * (1 - shadow_mask * (1 - temp[c]))
+    return (np.clip(result, 0, 1) * 255).astype(np.uint8)
+
+
+def apply_ambient_occlusion(image, mask):
+    """Add edge darkening at shadow boundaries."""
+    img = image.astype(np.float32) / 255.0
+    shadow_mask = mask.astype(np.float32) / 255.0
+    edges = cv2.Canny((shadow_mask * 255).astype(np.uint8), 30, 100)
+    edges = cv2.dilate(edges, np.ones((5, 5), np.uint8), iterations=2)
+    edges = cv2.GaussianBlur(edges.astype(np.float32), (0, 0), 5.0)
+    edges = edges / (edges.max() + 1e-6)
+    occlusion_strength = random.uniform(0.15, 0.35)
+    result = img * (1 - edges[..., None] * occlusion_strength)
+    return (np.clip(result, 0, 1) * 255).astype(np.uint8)
+
+
+def apply_bounce_light(image, mask):
+    """Add subtle bounce light in shadow areas."""
+    img = image.astype(np.float32) / 255.0
+    h, w = img.shape[:2]
+    shadow_mask = mask.astype(np.float32) / 255.0
+    gradient = np.zeros((h, w), dtype=np.float32)
+    side = random.choice(["left", "right", "top", "bottom"])
+    if side == "left":
+        gradient = np.linspace(0.8, 1.0, w)[None, :]
+    elif side == "right":
+        gradient = np.linspace(1.0, 0.8, w)[None, :]
+    elif side == "top":
+        gradient = np.linspace(0.8, 1.0, h)[:, None]
+    else:
+        gradient = np.linspace(1.0, 0.8, h)[:, None]
+    gradient = cv2.GaussianBlur(gradient, (0, 0), max(h // 4, 1))
+    bounce_strength = random.uniform(0.05, 0.15)
+    # Bounce light must brighten shadow pixels. Previous `(gradient - 1)`
+    # term was negative and therefore darkened them further.
+    result = img * (1 + shadow_mask[..., None] * gradient[..., None] * bounce_strength)
+    return (np.clip(result, 0, 1) * 255).astype(np.uint8)
+
+
+def apply_realistic_shadow(image, return_mask=False):
+    """Apply realistic shadow with color temperature, ambient occlusion, and bounce light."""
+    img = image.copy()
+    h, w = img.shape[:2]
+    if random.random() < 0.6:
+        shadow_img, mask = apply_object_shadow(img, return_mask=True)
+    else:
+        shadow_img, mask = apply_document_shadow(img, return_mask=True)
+    if random.random() < 0.75:
+        shadow_img = apply_color_temperature_shift(shadow_img, mask)
+    if random.random() < 0.5:
+        shadow_img = apply_ambient_occlusion(shadow_img, mask)
+    if random.random() < 0.4:
+        shadow_img = apply_bounce_light(shadow_img, mask)
+    if return_mask:
+        return shadow_img, mask
+    return shadow_img

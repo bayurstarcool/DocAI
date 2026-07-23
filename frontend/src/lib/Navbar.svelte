@@ -11,6 +11,7 @@
     { href: '/train', icon: 'brain', label: 'Training' },
     { href: '/image-tests', icon: 'images', label: 'Image Tests' },
     { href: '/datasets', icon: 'database', label: 'Datasets' },
+    { href: '/dataset-manager', icon: 'settings-2', label: 'Dataset Manager' },
   ]
 
   function isActive(href) {
@@ -80,30 +81,27 @@
 </nav>
 
 <style>
-  .navbar { position: sticky; top: 0; z-index: 100; background: rgba(9,9,11,0.75); backdrop-filter: blur(16px); border-bottom: 1px solid var(--border); }
-  .nav-inner { max-width: 1280px; margin: 0 auto; padding: 0 1.5rem; height: 64px; display: flex; align-items: center; justify-content: space-between; }
-  .logo { display: flex; align-items: center; gap: 0.625rem; }
-  .logo-mark { width: 36px; height: 36px; background: linear-gradient(135deg,#6366f1,#06b6d4); border-radius: 10px; display: grid; place-items: center; color: white; }
-  .logo-text { font-size: 1.125rem; font-weight: 700; }
-  .nav-links { display: flex; gap: 0.25rem; }
-  .nav-links a { color: var(--text2); font-weight: 500; font-size: 0.875rem; padding: 0.5rem 0.875rem; border-radius: var(--radius-xs); transition: all 0.15s; display: flex; align-items: center; gap: 0.5rem; text-decoration: none; }
-  .nav-links a:hover { color: var(--text); background: var(--bg3); }
-  .nav-links a.active { color: var(--accent2); background: rgba(6,182,212,0.1); }
-  .nav-right { display: flex; align-items: center; gap: 0.75rem; }
-  .user-chip { display: flex; align-items: center; gap: 0.5rem; padding: 0.375rem 0.75rem 0.375rem 0.375rem; background: var(--bg3); border: 1px solid var(--border); border-radius: 999px; }
-  .user-avatar { width: 28px; height: 28px; background: linear-gradient(135deg, #8b5cf6, #ec4899); border-radius: 50%; display: grid; place-items: center; color: white; }
-  .btn-logout { display: flex; align-items: center; padding: 0.5rem; background: transparent; border: 1px solid var(--border); border-radius: var(--radius-xs); color: var(--text2); transition: all 0.15s; }
-  .btn-logout:hover { border-color: var(--error); color: var(--error); }
-  .nav-toggle { display: none; background: none; border: 1px solid var(--border); color: var(--text2); padding: 0.5rem; border-radius: var(--radius-xs); cursor: pointer; }
-  .nav-mobile { display: none; position: absolute; top: 64px; left: 0; right: 0; background: var(--bg2); border-bottom: 1px solid var(--border); padding: 0.75rem; z-index: 200; }
-  .nav-mobile.open { display: block; }
-  .nav-mobile a { display: flex; align-items: center; gap: 0.75rem; padding: 0.75rem 1rem; color: var(--text2); border-radius: var(--radius-xs); font-weight: 500; font-size: 0.9rem; text-decoration: none; }
-  .nav-mobile a:hover { background: var(--bg3); color: var(--text); }
-  .nav-mobile a.active { color: var(--accent2); background: rgba(6,182,212,0.1); }
-  .divider { height: 1px; background: var(--border); margin: 0.5rem 0; }
-  @media (max-width: 768px) {
-    .nav-links { display: none !important; }
-    .nav-toggle { display: flex; }
-    .user-name { display: none; }
-  }
+  .navbar { position: sticky; top: 0; z-index: 100; background: rgba(8,9,10,.82); backdrop-filter: blur(20px) saturate(135%); border-bottom: 1px solid rgba(255,255,255,.065); }
+  .nav-inner { width: min(100%,1320px); margin: 0 auto; padding: 0 clamp(1rem,3vw,2rem); height: 62px; display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
+  .logo { display:flex; align-items:center; gap:.65rem; flex-shrink:0; }
+  .logo-mark { width:34px; height:34px; background:linear-gradient(145deg,#6d72dd,#5359b7); border:1px solid rgba(255,255,255,.14); border-radius:9px; display:grid; place-items:center; color:white; box-shadow:0 7px 22px rgba(69,75,190,.23); }
+  .logo-text { font-size:1rem; font-weight:590; letter-spacing:-.035em; }
+  .nav-links { display:flex; align-items:center; gap:.18rem; padding:.25rem; background:rgba(255,255,255,.018); border:1px solid rgba(255,255,255,.055); border-radius:9px; }
+  .nav-links a { color:var(--text2); font-weight:510; font-size:.82rem; padding:.46rem .72rem; border-radius:6px; display:flex; align-items:center; gap:.45rem; min-height:36px; }
+  .nav-links a:hover { color:var(--text); background:rgba(255,255,255,.045); }
+  .nav-links a.active { color:#e8e9ff; background:rgba(113,112,255,.14); box-shadow:inset 0 0 0 1px rgba(130,143,255,.14); }
+  .nav-right { display:flex; align-items:center; gap:.55rem; flex-shrink:0; }
+  .user-chip { display:flex; align-items:center; gap:.45rem; padding:.3rem .65rem .3rem .3rem; background:rgba(255,255,255,.025); border:1px solid var(--border); border-radius:999px; }
+  .user-avatar { width:27px; height:27px; background:linear-gradient(145deg,#7170ff,#4f54a8); border-radius:50%; display:grid; place-items:center; color:white; }
+  .user-name { max-width:110px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:.78rem; }
+  .btn-logout,.nav-toggle { display:flex; align-items:center; justify-content:center; width:38px; height:38px; min-height:38px; background:rgba(255,255,255,.02); border:1px solid var(--border); border-radius:7px; color:var(--text2); }
+  .btn-logout:hover { border-color:rgba(239,68,68,.5); color:#f87171; }
+  .nav-toggle { display:none; }
+  .nav-mobile { display:none; position:absolute; top:62px; left:.65rem; right:.65rem; background:rgba(15,16,17,.98); border:1px solid var(--border); border-radius:0 0 12px 12px; padding:.6rem; z-index:200; box-shadow:0 20px 50px rgba(0,0,0,.5); }
+  .nav-mobile.open { display:block; }
+  .nav-mobile a { display:flex; align-items:center; gap:.75rem; min-height:46px; padding:.7rem .85rem; color:var(--text2); border-radius:7px; font-weight:510; font-size:.9rem; }
+  .nav-mobile a:hover,.nav-mobile a.active { background:rgba(113,112,255,.1); color:var(--text); }
+  .divider { height:1px; background:var(--border); margin:.45rem 0; }
+  @media(max-width:900px){ .nav-links{display:none}.nav-toggle{display:flex}.user-chip{display:none}.nav-inner{height:58px}.nav-mobile{top:58px} }
+  @media(max-width:430px){ .btn-logout{display:none}.logo-mark{width:32px;height:32px}.nav-inner{padding:0 .85rem} }
 </style>

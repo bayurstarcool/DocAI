@@ -1,6 +1,6 @@
 <script>
   import { refreshIcons } from "../lib/icons.js"
-  import { onMount } from 'svelte'
+  import { onDestroy, onMount } from 'svelte'
   import { apiJson } from '../stores/auth.js'
   import { showToast } from '../stores/toast.js'
 
@@ -9,15 +9,49 @@
   let selectedMode = 'restore'
   let resultBlob = null
   let resultUrl = ''
+  let originalUrl = ''
   let processing = false
   let ocrResult = null
   let detectedText = ''
   let pipelineResult = null
+  let trainedRuns = []
+  let liveCheckpoints = []
+  let selectedCheckpoint = 'checkpoints/document_restorer/best.pth'
+  let checkpointTimer = null
+
+  const checkpointModes = new Set(['restore', 'full_pipeline'])
+
+  async function refreshCheckpoints() {
+    try {
+      const data = await apiJson('/api/training/runs')
+      trainedRuns = (data.runs || []).filter(run => (run.checkpoints || []).length)
+      liveCheckpoints = data.live_checkpoints || []
+      const available = new Set([
+        ...liveCheckpoints.map(item => item.path),
+        ...trainedRuns.flatMap(run => (run.checkpoints || []).map(item => item.path))
+      ])
+      if (!available.has(selectedCheckpoint) && liveCheckpoints.length) selectedCheckpoint = liveCheckpoints[0].path
+    } catch (e) {
+      showToast(`Gagal refresh checkpoint: ${e.message}`, 'error')
+    }
+  }
+
+  async function syncSelectedCheckpoint(token) {
+    const response = await fetch('/api/model/reload', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ checkpoint: selectedCheckpoint })
+    })
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}))
+      throw new Error(error.detail || `Reload checkpoint gagal (${response.status})`)
+    }
+    return response.json()
+  }
 
   const modes = [
     { id: 'restore', icon: 'wand-2', label: 'AI Restore' },
     { id: 'full_pipeline', icon: 'workflow', label: 'Full Pipeline' },
-    { id: 'shadow_remove', icon: 'sun-dim', label: 'Shadow Remove' },
     { id: 'enhance', icon: 'sparkles', label: 'AI Enhance' },
     { id: 'magic_enhance', icon: 'magic-wand', label: 'Magic Enhance' },
     { id: 'binarize', icon: 'contrast', label: 'Binarize' },
@@ -37,6 +71,13 @@
       stats.shadow = d.models?.shadow_remover ? 'Loaded' : 'Not loaded'
       stats.enhancer = d.models?.doc_enhancer ? 'Loaded' : 'Not loaded'
     } catch(e) {}
+    await refreshCheckpoints()
+    checkpointTimer = setInterval(refreshCheckpoints, 5000)
+  })
+
+  onDestroy(() => {
+    if (checkpointTimer) clearInterval(checkpointTimer)
+    if (resultUrl?.startsWith('blob:')) URL.revokeObjectURL(resultUrl)
   })
 
   function handleDrop(e) {
@@ -46,12 +87,11 @@
 
   function handleFile(file) {
     selectedFile = file
+    resultUrl = ''
+    resultBlob = null
+    pipelineResult = null
     const r = new FileReader()
-    r.onload = () => {
-      pipelineResult = null
-      resultUrl = ''
-      resultBlob = null
-    }
+    r.onload = () => { originalUrl = r.result }
     r.readAsDataURL(file)
   }
 
@@ -68,7 +108,10 @@
       try {
         const token = localStorage.getItem('docai_token')
         const res = await fetch('/api/ocr/detect', { method: 'POST', headers: { Authorization: `Bearer ${token}` }, body: fd })
-        if (!res.ok) throw new Error('OCR failed')
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}))
+          throw new Error(err.detail || `OCR error ${res.status}`)
+        }
         const data = await res.json()
         detectedText = data.text || '(Tidak ada teks terdeteksi)'
         ocrResult = data
@@ -88,8 +131,12 @@
       const start = performance.now()
       try {
         const token = localStorage.getItem('docai_token')
+        await syncSelectedCheckpoint(token)
         const res = await fetch('/api/pipeline/process-json', { method: 'POST', headers: { Authorization: `Bearer ${token}` }, body: fd })
-        if (!res.ok) throw new Error('Pipeline failed')
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}))
+          throw new Error(err.detail || `Pipeline error ${res.status}`)
+        }
         const data = await res.json()
         pipelineResult = data
         resultUrl = data.image
@@ -108,8 +155,12 @@
     const start = performance.now()
     try {
       const token = localStorage.getItem('docai_token')
+      if (checkpointModes.has(selectedMode)) await syncSelectedCheckpoint(token)
       const res = await fetch('/api/scan', { method: 'POST', headers: { Authorization: `Bearer ${token}` }, body: fd })
-      if (!res.ok) throw new Error('Processing failed')
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}))
+        throw new Error(err.detail || `Server error ${res.status}`)
+      }
       resultBlob = await res.blob()
       resultUrl = URL.createObjectURL(resultBlob)
       const ms = Math.round(performance.now() - start)
@@ -136,7 +187,7 @@
   <div class="stat-card"><div class="label">Device</div><div class="value accent">{stats.device}</div></div>
   <div class="stat-card"><div class="label">Restorer</div><div class="value success">{stats.restorer}</div></div>
   <div class="stat-card"><div class="label">Shadow Remover</div><div class="value success">{stats.shadow}</div></div>
-  <div class="stat-card"><div class="label">Enhancer</div><div class="value success">{stats.enhancer}</div></div>
+  <div class="stat-card"><div class="label">Enhancer</div><div class="value" style="color:var(--text3)">{stats.enhancer}</div></div>
 </div>
 
 <div class="card">
@@ -161,6 +212,25 @@
     </div>
   </div>
 
+  {#if checkpointModes.has(selectedMode)}
+    <div class="model-select" style="margin-top:1rem">
+      <label for="homeCheckpoint">Trained checkpoint</label>
+      <select id="homeCheckpoint" bind:value={selectedCheckpoint}>
+        {#each liveCheckpoints as checkpoint}
+          <option value={checkpoint.path}>{checkpoint.name}</option>
+        {/each}
+        {#each trainedRuns as run}
+          <optgroup label={run.run_id}>
+            {#each run.checkpoints || [] as checkpoint}
+              <option value={checkpoint.path}>{checkpoint.immutable ? 'Immutable · ' : ''}{checkpoint.name}</option>
+            {/each}
+          </optgroup>
+        {/each}
+      </select>
+      <p class="info-text">Auto-refresh 5 detik. Progress checkpoint belum divalidasi.</p>
+    </div>
+  {/if}
+
   <div class="process-bar">
     <button class="btn btn-primary" onclick={processImage} disabled={!selectedFile || processing}>
       {#if processing}<div class="spinner" style="width:16px;height:16px;border-width:2px"></div>{:else}<i data-lucide="play"></i>{/if}
@@ -175,16 +245,18 @@
   </div>
 </div>
 
-{#if resultUrl}
+{#if originalUrl}
   <div class="results-grid">
     <div class="result-box">
       <div class="header"><i data-lucide="image"></i> Original</div>
-      <img src={resultUrl} alt="Original" />
+      <img src={originalUrl} alt="Original" />
     </div>
-    <div class="result-box">
-      <div class="header"><i data-lucide="sparkles"></i> Result</div>
-      <img src={resultUrl} alt="Result" />
-    </div>
+    {#if resultUrl}
+      <div class="result-box">
+        <div class="header"><i data-lucide="sparkles"></i> Result</div>
+        <img src={resultUrl} alt="Result" />
+      </div>
+    {/if}
   </div>
 {/if}
 
@@ -271,4 +343,11 @@
   .ocr-word { display: inline-flex; align-items: center; gap: 0.25rem; padding: 0.2rem 0.5rem; background: var(--bg3); border: 1px solid var(--border); border-radius: 4px; font-size: 0.75rem; }
   .ocr-word.low-conf { opacity: 0.6; }
   .ocr-word small { color: var(--text3); font-size: 0.6rem; }
+
+  .model-select { display:grid; gap:.45rem; min-width:0; }
+  .model-select label { font-size:.72rem; font-weight:590; color:var(--text2); text-transform:uppercase; letter-spacing:.055em; }
+  .model-select select { width:100%; padding:.72rem .8rem; border:1px solid var(--border); border-radius:var(--radius-xs); color:var(--text); }
+  @media(max-width:768px){
+    .mode-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.results-grid{gap:.8rem}.result-box img{max-height:72vh;object-fit:contain}.pipeline-step{align-items:flex-start}.step-time{display:none}
+  }
 </style>

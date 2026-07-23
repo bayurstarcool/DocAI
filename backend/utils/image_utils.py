@@ -89,8 +89,8 @@ def segment_document(image: Image.Image) -> Image.Image:
 def _soft_shadow_matte(mask_image: Image.Image) -> np.ndarray:
     mask = np.asarray(mask_image.convert('L'), dtype=np.float32) / 255.0
     mask = cv2.GaussianBlur(mask, (0, 0), 2.5)
-    matte = np.clip((mask - 0.02) / 0.28, 0, 1)
-    return np.clip(matte ** 0.7, 0, 1)
+    matte = np.clip((mask - 0.005) / 0.40, 0, 1)
+    return np.clip(matte ** 0.45, 0, 1)
 
 def _estimate_illumination_map(image_rgb: np.ndarray, shadow_matte: np.ndarray) -> np.ndarray:
     image_float = image_rgb.astype(np.float32) / 255.0
@@ -98,30 +98,72 @@ def _estimate_illumination_map(image_rgb: np.ndarray, shadow_matte: np.ndarray) 
     kernel = max(31, int(min(image_rgb.shape[:2]) * 0.09) | 1)
     illumination = cv2.GaussianBlur(luma, (kernel, kernel), 0)
     shadow_darkening = cv2.GaussianBlur(shadow_matte, (0, 0), max(3, kernel / 8))
-    return np.clip(illumination * (1.0 - shadow_darkening * 0.45), 0.06, 1.0)
+    return np.clip(illumination * (1.0 - shadow_darkening * 0.50), 0.08, 1.0)
 
 def _apply_shadow_correction(original_rgb: np.ndarray, ai_rgb: np.ndarray, shadow_matte: np.ndarray,
-                             illumination_map: np.ndarray) -> np.ndarray:
+                             illumination_map: np.ndarray, strength: float = 1.0) -> np.ndarray:
+    """Apply shadow correction blending AI and traditional methods.
+    
+    strength: 0.0 = no correction (original), 1.0 = full correction (default)
+    """
     original = original_rgb.astype(np.float32) / 255.0
     ai = ai_rgb.astype(np.float32) / 255.0
     target_illumination = max(np.percentile(illumination_map, 90), 0.88)
-    gain = np.clip(target_illumination / np.maximum(illumination_map, 0.06), 1.0, 2.15)
+    gain = np.clip(target_illumination / np.maximum(illumination_map, 0.08), 1.0, 2.5)
     traditional = np.clip(original * gain[..., None], 0, 1)
     matte = np.clip(shadow_matte[..., None], 0, 1)
-    corrected = original * (1 - matte) + (ai * 0.78 + traditional * 0.22) * matte
+    # Blend AI and traditional in shadow areas
+    corrected_shadow = ai * 0.85 + traditional * 0.15
+    # Apply strength: blend between original and corrected
+    corrected = original * (1 - matte) + (original * (1 - strength) + corrected_shadow * strength) * matte
     return (np.clip(corrected, 0, 1) * 255).astype(np.uint8)
 
 def _white_balance_gray_world(image_rgb: np.ndarray) -> np.ndarray:
     image = image_rgb.astype(np.float32)
     means = image.reshape(-1, 3).mean(axis=0)
-    target = means.mean()
+    target = max(means.mean(), 130.0)  # higher target for brightness
     gains = target / np.maximum(means, 1.0)
-    return np.clip(image * gains, 0, 255).astype(np.uint8)
+    # gentle lift only
+    brightness_boost = np.clip(target / max(means.mean(), 1.0), 1.0, 1.12)
+    return np.clip(image * gains * brightness_boost, 0, 255).astype(np.uint8)
+
+def _uniform_lighting(image_rgb: np.ndarray) -> np.ndarray:
+    """Gentle lighting normalization - uniform luminance without over-whitening."""
+    img = image_rgb.astype(np.float32) / 255.0
+    
+    # Convert to LAB for luminance-only adjustment
+    lab = cv2.cvtColor(img, cv2.COLOR_RGB2LAB)
+    L = lab[:, :, 0]
+    
+    # Estimate illumination gradient (low-frequency)
+    blur_size = max(L.shape) // 8
+    if blur_size % 2 == 0:
+        blur_size += 1
+    illumination = cv2.GaussianBlur(L, (blur_size, blur_size), 0)
+    
+    # Target: median luminance (robust to outliers)
+    target_L = np.median(L)
+    
+    # Gentle correction: don't force to target, just reduce gradient
+    # correction_strength: 0.4 = moderate, keeps natural feel
+    correction_strength = 0.4
+    
+    # Compute correction ratio
+    ratio = target_L / (illumination + 1e-6)
+    ratio = np.clip(ratio, 0.7, 1.4)  # Limit correction range
+    
+    # Apply gentle correction
+    correction = 1.0 + correction_strength * (ratio - 1.0)
+    lab[:, :, 0] = np.clip(L * correction, 0, 100)
+    
+    result = cv2.cvtColor(lab, cv2.COLOR_LAB2RGB)
+    return np.clip(result * 255.0, 0, 255).astype(np.uint8)
+
 
 def _local_contrast_enhancement(image_rgb: np.ndarray) -> np.ndarray:
     lab = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2LAB)
     l_channel, a_channel, b_channel = cv2.split(lab)
-    clahe = cv2.createCLAHE(clipLimit=2.2, tileGridSize=(8, 8))
+    clahe = cv2.createCLAHE(clipLimit=1.2, tileGridSize=(8, 8))
     enhanced_l = clahe.apply(l_channel)
     enhanced = cv2.merge([enhanced_l, a_channel, b_channel])
     return cv2.cvtColor(enhanced, cv2.COLOR_LAB2RGB)
@@ -136,11 +178,11 @@ def _paper_whitening(image_rgb: np.ndarray) -> np.ndarray:
     paper = stretched_l > np.percentile(stretched_l, 62)
     whitened = image.copy()
     white_target = np.array([246, 246, 242], dtype=np.float32)
-    blend = np.clip((stretched_l - 160) / 95, 0, 0.42)[..., None]
+    blend = np.clip((stretched_l - 185) / 70, 0, 0.15)[..., None]
     whitened[paper] = whitened[paper] * (1 - blend[paper]) + white_target * blend[paper]
     lab[..., 0] = stretched_l.astype(np.uint8)
     contrast_rgb = cv2.cvtColor(lab, cv2.COLOR_LAB2RGB).astype(np.float32)
-    result = contrast_rgb * 0.55 + whitened * 0.45
+    result = contrast_rgb * 0.85 + whitened * 0.15
     return np.clip(result, 0, 255).astype(np.uint8)
 
 def run_document_restoration_pipeline(
@@ -150,31 +192,89 @@ def run_document_restoration_pipeline(
     tile_size: int = 1024,
     overlap: int = 96,
     segment: bool = False,
+    mode: str = "full",
+    shadow_strength: float = 1.0,
 ):
+    """Run document restoration pipeline.
+    
+    Modes:
+        full    - AI + shadow correction + white balance + whitening + CLAHE (default)
+        ai_only - AI model output only (preserves original colors)
+        ai      - AI + shadow correction only (no color processing)
+        color   - AI + shadow correction + CLAHE only (no white balance/whitening)
+    """
     segmented = segment_document(image) if segment else image.convert('RGB')
     ai_corrected, mask_image = run_tiled_restoration(model, segmented, device, tile_size=tile_size, overlap=overlap)
+    
+    if mode == "ai_only":
+        # Apply gentle uniform lighting to balance shadow vs non-shadow areas
+        ai_arr = np.asarray(ai_corrected.convert("RGB"))
+        ai_uniform = _uniform_lighting(ai_arr)
+        result = Image.fromarray(ai_uniform)
+        info = {
+            'pipeline': ['input', 'ai_model', 'uniform_lighting', 'ai_only_output'],
+            'segmented_size': segmented.size,
+            'mask_mean': float(np.asarray(mask_image).mean()) if mask_image else 0,
+            'illumination_mean': float(np.mean(np.asarray(result.convert("L")))) / 255.0,
+        }
+        return result, mask_image, info
+
+    if mode == "ai_shadow":
+        # Targeted gamma: brighten dark areas aggressively
+        ai_arr = np.asarray(ai_corrected.convert("RGB"))
+        ai_float = ai_arr.astype(np.float32) / 255.0
+        
+        luma = 0.299 * ai_float[:,:,0] + 0.587 * ai_float[:,:,1] + 0.114 * ai_float[:,:,2]
+        
+        # Detect dark areas (shadow artifacts)
+        dark_mask = (luma < 0.60).astype(np.float32)
+        dark_mask = cv2.GaussianBlur(dark_mask, (0, 0), 11.0)
+        
+        # Gamma: strength 1.0 -> gamma 0.15 (near 0% shadow), strength 0.3 -> gamma 0.6
+        gamma = 0.15 + (1.0 - shadow_strength) * 0.45
+        
+        corrected = ai_float.copy()
+        for c in range(3):
+            corrected[:,:,c] = np.where(
+                dark_mask > 0.05,
+                np.power(np.maximum(ai_float[:,:,c], 0.001), gamma),
+                ai_float[:,:,c]
+            )
+        
+        final = ai_float * (1 - dark_mask[...,None]) + corrected * dark_mask[...,None]
+        final_arr = (np.clip(final, 0, 1) * 255).astype(np.uint8)
+        
+        info = {
+            "pipeline": ["input", "ai_model", "dark_area_detection", "gamma_correction"],
+            "segmented_size": segmented.size,
+            "mask_mean": float(dark_mask.mean()),
+            "illumination_mean": float(luma.mean()),
+        }
+        return Image.fromarray(final_arr), mask_image, info
+    
     segmented_rgb = np.asarray(segmented.convert('RGB'))
     ai_rgb = np.asarray(ai_corrected.convert('RGB'))
     shadow_matte = _soft_shadow_matte(mask_image)
     illumination_map = _estimate_illumination_map(segmented_rgb, shadow_matte)
-    corrected = _apply_shadow_correction(segmented_rgb, ai_rgb, shadow_matte, illumination_map)
-    balanced = _white_balance_gray_world(corrected)
-    whitened = _paper_whitening(balanced)
-    final = _local_contrast_enhancement(whitened)
+    corrected = _apply_shadow_correction(segmented_rgb, ai_rgb, shadow_matte, illumination_map, strength=shadow_strength)
+    
+    if mode == "ai":
+        final = corrected
+        pipeline_steps = ['input', 'shadow_mask_prediction', 'illumination_map_estimation', 'shadow_correction']
+    elif mode == "color":
+        final = _local_contrast_enhancement(corrected)
+        pipeline_steps = ['input', 'shadow_mask_prediction', 'illumination_map_estimation', 'shadow_correction', 'local_contrast_enhancement']
+    else:  # full
+        balanced = _white_balance_gray_world(corrected)
+        uniform = _uniform_lighting(balanced)
+        final = _local_contrast_enhancement(uniform)
+        pipeline_steps = ['input', 'shadow_mask_prediction', 'illumination_map_estimation', 'shadow_correction', 'white_balance', 'uniform_lighting', 'local_contrast_enhancement', 'final_document']
+    
     info = {
-        'pipeline': [
-            'input',
-            'document_segmentation' if segment else 'preserve_original_frame',
-            'shadow_mask_prediction',
-            'illumination_map_estimation',
-            'shadow_correction',
-            'white_balance',
-            'local_contrast_enhancement',
-            'final_document',
-        ],
+        'pipeline': pipeline_steps,
         'segmented_size': segmented.size,
         'mask_mean': float(shadow_matte.mean()),
-        'illumination_mean': float(illumination_map.mean()),
+        'illumination_mean': float(illumination_map.mean())
     }
     return Image.fromarray(final), mask_image, info
 

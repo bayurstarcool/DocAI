@@ -8,14 +8,24 @@
   let selectedFile = null
   let originalUrl = ''
   let selectedMode = 'restore'
+  let pipelineMode = 'full'
+  let shadowStrength = 1.0
   let resultUrl = ''
   let processing = false
   let docshadowWeights = []
   let trainedRuns = []
+  let liveCheckpoints = []
+  let checkpointTimer = null
   let selectedCheckpoint = 'checkpoints/document_restorer/best.pth'
   let loadedCheckpoint = ''
 
-  const modes = ['restore','shadow_remove','enhance','magic_enhance','binarize','cleanup','clahe','denoise','sharpen','deskew']
+  const modes = ['restore','magic_enhance','binarize','cleanup','clahe','denoise','sharpen','deskew']
+  const pipelineModes = [
+    { value: 'full', label: 'Full Pipeline', desc: 'AI + white balance + whitening + CLAHE' },
+    { value: 'ai_only', label: 'AI Only', desc: 'Model output langsung, warna terjaga' },
+    { value: 'ai', label: 'AI + Shadow Fix', desc: 'AI + shadow correction, tanpa color processing' },
+    { value: 'color', label: 'AI + CLAHE', desc: 'AI + contrast enhancement, tanpa white balance' },
+  ]
   const pretrainedModes = ['SD7K', 'Jung', 'Kligler'].map(name => ({ name }))
   const modeLabels = { restore:'AI Restore', shadow_remove:'Shadow Remove', enhance:'AI Enhance', magic_enhance:'Magic Enhance', binarize:'Binarize', cleanup:'Full Cleanup', clahe:'CLAHE', denoise:'Denoise', sharpen:'Sharpen', deskew:'Deskew' }
   $: availableDocshadowNames = new Set(docshadowWeights.map(w => w.name))
@@ -26,6 +36,22 @@
   }
   $: selectedModelFamily = selectedMode.startsWith('docshadow:') ? 'docshadow' : 'docai'
 
+
+  async function refreshCheckpoints() {
+    try {
+      const data = await apiJson('/api/training/runs')
+      trainedRuns = (data.runs || []).filter(run => (run.checkpoints || []).length)
+      liveCheckpoints = data.live_checkpoints || []
+      const available = new Set([
+        ...liveCheckpoints.map(item => item.path),
+        ...trainedRuns.flatMap(run => (run.checkpoints || []).map(item => item.path))
+      ])
+      if (!available.has(selectedCheckpoint) && liveCheckpoints.length) selectedCheckpoint = liveCheckpoints[0].path
+    } catch (e) {
+      showToast(`Gagal refresh checkpoint: ${e.message}`, 'error')
+    }
+  }
+
   onMount(async () => {
     refreshIcons()
     try { modelInfo = await apiJson('/api/models/info') } catch(e) {}
@@ -33,13 +59,12 @@
       const d = await apiJson('/api/docshadow/weights')
       docshadowWeights = d.weights || []
     } catch(e) { docshadowWeights = [] }
-    try {
-      const d = await apiJson('/api/training/runs')
-      trainedRuns = d.runs || []
-    } catch(e) { trainedRuns = [] }
+    await refreshCheckpoints()
+    checkpointTimer = setInterval(refreshCheckpoints, 5000)
   })
 
   onDestroy(() => {
+    if (checkpointTimer) clearInterval(checkpointTimer)
     if (resultUrl) URL.revokeObjectURL(resultUrl)
   })
 
@@ -69,6 +94,10 @@
     const fd = new FormData()
     fd.append('file', selectedFile)
     fd.append('mode', selectedMode)
+    if (selectedMode === 'restore') {
+      fd.append('pipeline_mode', pipelineMode)
+      fd.append('shadow_strength', shadowStrength)
+    }
     const start = performance.now()
     try {
       const token = localStorage.getItem('docai_token')
@@ -154,18 +183,49 @@
             : 'Model lokal dan mode enhancement DocAI.'}
         </p>
       </div>
-      {#if selectedModelFamily === 'docai'}
+      {#if selectedMode === 'restore'}
         <div class="model-select">
           <label>Trained checkpoint</label>
           <select bind:value={selectedCheckpoint}>
-            <option value="checkpoints/document_restorer/best.pth">Live best.pth</option>
+            {#each liveCheckpoints as checkpoint}
+              <option value={checkpoint.path}>{checkpoint.name}</option>
+            {/each}
             {#each trainedRuns as run}
-              {#each run.checkpoints || [] as checkpoint}
-                <option value={checkpoint.path}>{run.run_id} · {checkpoint.name}</option>
-              {/each}
+              <optgroup label={run.run_id}>
+                {#each run.checkpoints || [] as checkpoint}
+                  <option value={checkpoint.path}>{checkpoint.immutable ? 'Immutable · ' : ''}{checkpoint.name}</option>
+                {/each}
+              </optgroup>
             {/each}
           </select>
+          <p class="info-text">Auto-refresh 5 detik. Progress checkpoint belum divalidasi.</p>
         </div>
+      {/if}
+      {#if selectedMode === 'restore'}
+        <div class="model-select" style="margin-top:1rem">
+          <label>Pipeline Mode</label>
+          <div class="pretrained-pills">
+            {#each pipelineModes as pm}
+              <button
+                class="pill"
+                class:active={pipelineMode === pm.value}
+                onclick={() => pipelineMode = pm.value}
+                title={pm.desc}
+              >
+                {pm.label}
+              </button>
+            {/each}
+          </div>
+          <p class="info-text">{pipelineModes.find(p => p.value === pipelineMode)?.desc}</p>
+        </div>
+        {#if pipelineMode !== 'ai_only'}
+          <div class="model-select" style="margin-top:0.75rem">
+            <label>Shadow Strength: {shadowStrength.toFixed(1)}</label>
+            <input type="range" min="0" max="1" step="0.1" bind:value={shadowStrength}
+              style="width:100%;accent-color:var(--primary)" />
+            <p class="info-text">0.0 = tanpa shadow fix, 1.0 = full correction</p>
+          </div>
+        {/if}
       {/if}
       <div style="margin-top:1rem;display:flex;align-items:center;gap:0.75rem">
         <button class="btn btn-primary" onclick={runTest} disabled={!selectedFile || processing}>

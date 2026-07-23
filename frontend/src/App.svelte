@@ -9,6 +9,8 @@
   import Training from './pages/Training.svelte'
   import ImageTests from './pages/ImageTests.svelte'
   import Datasets from './pages/Datasets.svelte'
+  import DatasetManager from './pages/DatasetManager.svelte'
+  import DatasetDetail from './pages/DatasetDetail.svelte'
 
   onMount(() => {
     initRouter()
@@ -27,8 +29,12 @@
     <Training />
   {:else if $currentRoute === '/image-tests'}
     <ImageTests />
-  {:else if $currentRoute === '/datasets'}
+  {:else if $currentRoute === '/datasets' || $currentRoute.startsWith('/datasets/')}
     <Datasets />
+  {:else if $currentRoute === '/dataset-manager'}
+    <DatasetManager />
+  {:else if $currentRoute.startsWith('/dataset-manager/')}
+    <DatasetDetail />
   {:else}
     <Dashboard />
   {/if}
@@ -36,5 +42,6 @@
 <Toast />
 
 <style>
-  .container { max-width: 1280px; margin: 0 auto; padding: 2rem 1.5rem; position: relative; z-index: 1; }
+  .container { width: min(100%, 1320px); margin: 0 auto; padding: 2rem clamp(1rem,3vw,2rem) 4rem; position: relative; z-index: 1; }
+  @media (max-width: 768px) { .container { padding: 1.25rem .85rem 5rem; } }
 </style>
