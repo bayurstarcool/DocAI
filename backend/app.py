@@ -870,7 +870,7 @@ async def training_status(request: Request):
     last_val_psnr = None
     last_val_ssim = None
     with _training_lock:
-        if not _training_log and TRAINING_LOG_PATH.exists():
+        if TRAINING_LOG_PATH.exists():
             _load_training_log(TRAINING_LOG_PATH.read_text(encoding='utf-8').splitlines())
         for line in reversed(_training_log):
             # Parse eta=1h 23m 45s from epoch log line
@@ -879,15 +879,15 @@ async def training_status(request: Request):
             if m:
                 eta = m.group(1)
             m = _re.search(r'epoch=(\d+)/(\d+)', line)
-            if m:
+            if m and current_epoch is None:
                 current_epoch = int(m.group(1))
                 total_epochs = int(m.group(2))
             m = _re.search(r'batch=(\d+)/(\d+)', line)
-            if m:
+            if m and current_batch is None:
                 current_batch = int(m.group(1))
                 total_batches = int(m.group(2))
             m = _re.search(r'train_loss=(\S+)', line)
-            if m:
+            if m and last_train_loss is None:
                 last_train_loss = m.group(1)
             m = _re.search(r'val_loss=(\S+)', line)
             if m:

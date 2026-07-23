@@ -104,7 +104,7 @@ def dataset_sampling_weights(dataset) -> torch.Tensor:
             child_weights = dataset_sampling_weights(child)
             root_mass = len(child) ** 0.5
             if isinstance(child, IdentityDocumentDataset):
-                root_mass *= 8.0  # v3: Strong boost for identity (target 20-30% effective sampling)
+                root_mass *= 2.0  # v3: target ~25-30% identity sampling; avoids weak shadow removal
             weights.append(child_weights / child_weights.sum().clamp_min(1e-12) * root_mass)
         return torch.cat(weights)
     return torch.ones(len(dataset), dtype=torch.double)
