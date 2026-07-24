@@ -116,6 +116,14 @@ def _apply_shadow_correction(original_rgb: np.ndarray, ai_rgb: np.ndarray, shado
     corrected_shadow = ai * 0.85 + traditional * 0.15
     # Apply strength: blend between original and corrected
     corrected = original * (1 - matte) + (original * (1 - strength) + corrected_shadow * strength) * matte
+    # Edge-aware blending: smooth transition at shadow boundary to avoid halos
+    # NOTE: cv2.GaussianBlur squeezes the (H,W,1) channel dim back to (H,W);
+    # re-expand before using in broadcast with (H,W,3) arrays.
+    matte_blur = cv2.GaussianBlur(matte.astype(np.float32), (21, 21), 7)
+    if matte_blur.ndim == 2:
+        matte_blur = matte_blur[..., None]
+    matte_blur = np.clip(matte_blur, 0, 1)
+    corrected = original * (1 - matte_blur) + corrected * matte_blur
     return (np.clip(corrected, 0, 1) * 255).astype(np.uint8)
 
 def _white_balance_gray_world(image_rgb: np.ndarray) -> np.ndarray:
@@ -123,8 +131,8 @@ def _white_balance_gray_world(image_rgb: np.ndarray) -> np.ndarray:
     means = image.reshape(-1, 3).mean(axis=0)
     target = max(means.mean(), 130.0)  # higher target for brightness
     gains = target / np.maximum(means, 1.0)
-    # gentle lift only
-    brightness_boost = np.clip(target / max(means.mean(), 1.0), 1.0, 1.12)
+    # gentle lift only - reduce over-bright in already bright areas
+    brightness_boost = np.clip(target / max(means.mean(), 1.0), 1.0, 1.08)
     return np.clip(image * gains * brightness_boost, 0, 255).astype(np.uint8)
 
 def _uniform_lighting(image_rgb: np.ndarray) -> np.ndarray:
@@ -168,6 +176,22 @@ def _local_contrast_enhancement(image_rgb: np.ndarray) -> np.ndarray:
     enhanced = cv2.merge([enhanced_l, a_channel, b_channel])
     return cv2.cvtColor(enhanced, cv2.COLOR_LAB2RGB)
 
+def _text_sharpening(image_rgb: np.ndarray, strength: float = 0.3) -> np.ndarray:
+    """Gentle unsharp mask to recover text sharpness without noise.
+    
+    strength: 0.0 = no sharpening, 0.5 = moderate, 1.0 = strong
+    """
+    if strength <= 0:
+        return image_rgb
+    
+    # Gaussian blur for unsharp mask
+    blurred = cv2.GaussianBlur(image_rgb, (0, 0), 1.0)
+    # Compute high-frequency component
+    detail = image_rgb.astype(np.float32) - blurred.astype(np.float32)
+    # Add back scaled detail
+    sharpened = image_rgb.astype(np.float32) + detail * strength
+    return np.clip(sharpened, 0, 255).astype(np.uint8)
+
 def _paper_whitening(image_rgb: np.ndarray) -> np.ndarray:
     image = image_rgb.astype(np.float32)
     lab = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2LAB)
@@ -210,9 +234,11 @@ def run_document_restoration_pipeline(
         # Apply gentle uniform lighting to balance shadow vs non-shadow areas
         ai_arr = np.asarray(ai_corrected.convert("RGB"))
         ai_uniform = _uniform_lighting(ai_arr)
+        # Recover text sharpness
+        ai_uniform = _text_sharpening(ai_uniform, strength=0.4)
         result = Image.fromarray(ai_uniform)
         info = {
-            'pipeline': ['input', 'ai_model', 'uniform_lighting', 'ai_only_output'],
+            'pipeline': ['input', 'ai_model', 'uniform_lighting', 'text_sharpening', 'ai_only_output'],
             'segmented_size': segmented.size,
             'mask_mean': float(np.asarray(mask_image).mean()) if mask_image else 0,
             'illumination_mean': float(np.mean(np.asarray(result.convert("L")))) / 255.0,
@@ -243,9 +269,14 @@ def run_document_restoration_pipeline(
         
         final = ai_float * (1 - dark_mask[...,None]) + corrected * dark_mask[...,None]
         final_arr = (np.clip(final, 0, 1) * 255).astype(np.uint8)
+        # Normalize luminance across whole page so gamma-corrected shadow area
+        # matches untouched non-shadow area (fixes tone mismatch complaint)
+        final_arr = _uniform_lighting(final_arr)
+        # Recover text sharpness lost during gamma+uniform_lighting
+        final_arr = _text_sharpening(final_arr, strength=0.4)
         
         info = {
-            "pipeline": ["input", "ai_model", "dark_area_detection", "gamma_correction"],
+            "pipeline": ["input", "ai_model", "dark_area_detection", "gamma_correction", "uniform_lighting", "text_sharpening"],
             "segmented_size": segmented.size,
             "mask_mean": float(dark_mask.mean()),
             "illumination_mean": float(luma.mean()),

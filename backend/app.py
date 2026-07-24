@@ -422,7 +422,8 @@ async def system_status(request: Request):
 #  CORE SCANNING ENDPOINTS
 # =====================================================================
 @app.post("/api/scan")
-async def scan_document(request: Request, file: UploadFile = File(...), mode: str = Form("restore")):
+async def scan_document(request: Request, file: UploadFile = File(...), mode: str = Form("restore"),
+                         pipeline_mode: str = Form("full"), shadow_strength: float = Form(1.0)):
     # require_api_auth(request)  # Public for image loading
     image = _read_image(file)
 
@@ -432,6 +433,7 @@ async def scan_document(request: Request, file: UploadFile = File(...), mode: st
             restored, mask, info = run_document_restoration_pipeline(
                 doc_restorer_model, image, device,
                 tile_size=RESTORATION_TILE_SIZE, overlap=RESTORATION_TILE_OVERLAP,
+                mode=pipeline_mode, shadow_strength=shadow_strength,
             )
         elapsed = round((time.time() - start) * 1000, 1)
         return _pil_to_response(restored)
@@ -509,7 +511,8 @@ async def scan_document(request: Request, file: UploadFile = File(...), mode: st
 
 
 @app.post("/api/scan/json")
-async def scan_document_json(request: Request, file: UploadFile = File(...), mode: str = Form("restore")):
+async def scan_document_json(request: Request, file: UploadFile = File(...), mode: str = Form("restore"),
+                              pipeline_mode: str = Form("full"), shadow_strength: float = Form(1.0)):
     """Return processing info alongside the scan result."""
     # require_api_auth(request)  # Public for image loading
     image = _read_image(file)
@@ -520,6 +523,7 @@ async def scan_document_json(request: Request, file: UploadFile = File(...), mod
             restored, mask, info = run_document_restoration_pipeline(
                 doc_restorer_model, image, device,
                 tile_size=RESTORATION_TILE_SIZE, overlap=RESTORATION_TILE_OVERLAP,
+                mode=pipeline_mode, shadow_strength=shadow_strength,
             )
         elapsed = round((time.time() - start) * 1000, 1)
         uid = uuid.uuid4().hex[:8]
@@ -1955,13 +1959,13 @@ async def start_training(request: Request,
                          grad_clip_norm: float = Form(1.0),
                          perceptual_weight: float = Form(0.05),
                          ssim_weight: float = Form(0.1),
-                         shadow_loss_weight: float = Form(1.0),
-                         illumination_weight: float = Form(0.10),
+                         shadow_loss_weight: float = Form(1.5),
+                         illumination_weight: float = Form(0.20),
                          mask_loss_weight: float = Form(0.25),
                          gradient_weight: float = Form(0.05),
                          color_weight: float = Form(0.15),
                          identity_weight: float = Form(1.0),
-                         color_preservation_weight: float = Form(0.8),
+                         color_preservation_weight: float = Form(0.9),
                          text_weight: float = Form(0.2),
                          non_shadow_weight: float = Form(0.5),
                          warmup_epochs: int = Form(3),
