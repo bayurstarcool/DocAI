@@ -51,6 +51,11 @@
 
   const modes = [
     { id: 'restore', icon: 'wand-2', label: 'AI Restore' },
+    { id: 'shadow_remove', icon: 'sun-dim', label: 'Shadow Remove' },
+    { id: 'shadow_effective_bg', icon: 'sun', label: 'Shadow BG Est.' },
+    { id: 'shadow_iterative', icon: 'refresh-cw', label: 'Shadow Iterative' },
+    { id: 'shadow_so', icon: 'layers', label: 'Shadow SO' },
+    { id: 'shadow_so_aggressive', icon: 'zap', label: 'Shadow SO Aggr.' },
     { id: 'full_pipeline', icon: 'workflow', label: 'Full Pipeline' },
     { id: 'enhance', icon: 'sparkles', label: 'AI Enhance' },
     { id: 'magic_enhance', icon: 'magic-wand', label: 'Magic Enhance' },

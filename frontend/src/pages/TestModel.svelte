@@ -27,7 +27,7 @@
     { value: 'color', label: 'AI + CLAHE', desc: 'AI + contrast enhancement, tanpa white balance' },
   ]
   const pretrainedModes = ['SD7K', 'Jung', 'Kligler'].map(name => ({ name }))
-  const modeLabels = { restore:'AI Restore', shadow_remove:'Shadow Remove', enhance:'AI Enhance', magic_enhance:'Magic Enhance', binarize:'Binarize', cleanup:'Full Cleanup', clahe:'CLAHE', denoise:'Denoise', sharpen:'Sharpen', deskew:'Deskew' }
+  const modeLabels = { restore:'AI Restore', shadow_remove:'Shadow Remove', shadow_effective_bg:'Shadow BG Est.', shadow_iterative:'Shadow Iterative', shadow_so:'Shadow SO', shadow_so_aggressive:'Shadow SO Aggr.', enhance:'AI Enhance', magic_enhance:'Magic Enhance', binarize:'Binarize', cleanup:'Full Cleanup', clahe:'CLAHE', denoise:'Denoise', sharpen:'Sharpen', deskew:'Deskew' }
   $: availableDocshadowNames = new Set(docshadowWeights.map(w => w.name))
   $: docshadowModes = pretrainedModes.map(w => `docshadow:${w.name}`)
   $: allModeLabels = {
