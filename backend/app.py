@@ -38,9 +38,9 @@ from backend.utils.shadowremove_enhance import (
     magic_document_enhance, adaptive_binarize, ai_shadow_postprocess,
 )
 from backend.utils.so_shadow_removal import (
-from backend.utils.traditional_shadow_methods import effective_bg_estimation, iterative_removal
     so_shadow_removal, so_shadow_removal_enhanced, so_shadow_removal_aggressive,
 )
+from backend.utils.traditional_shadow_methods import effective_bg_estimation, iterative_removal, color_binarize
 from backend.models.shadow_remover import ShadowRemoverNet
 from backend.models.doc_enhancer import DocEnhancerNet
 
@@ -497,6 +497,13 @@ async def scan_document(request: Request, file: UploadFile = File(...), mode: st
         result_np = iterative_removal(img_np)
         elapsed = round((time.time() - start) * 1000, 1)
         return _pil_to_response(Image.fromarray(result_np))
+
+    elif mode == "color_binarize":
+        start = time.time()
+        img_np = np.array(image.convert("RGB"))
+        result_np = color_binarize(img_np)
+        elapsed = round((time.time() - start) * 1000, 1)
+        return _pil_to_response(Image.fromarray(result_np))
     elif mode == "magic_enhance":
         start = time.time()
         result_np = magic_document_enhance(np.array(image))
@@ -540,7 +547,7 @@ async def scan_document(request: Request, file: UploadFile = File(...), mode: st
         return _pil_to_response(result)
 
     else:
-        available = ["restore", "shadow_remove", "shadow_so", "shadow_so_aggressive", "shadow_effective_bg", "shadow_iterative", "enhance", "magic_enhance", "binarize",
+        available = ["restore", "shadow_remove", "shadow_so", "shadow_so_aggressive", "shadow_effective_bg", "shadow_iterative", "color_binarize", "enhance", "magic_enhance", "binarize",
                       "deskew", "cleanup", "clahe", "denoise", "sharpen"]
         raise HTTPException(status_code=400,
                             detail=f"Mode '{mode}' not available. Use one of: {available}")

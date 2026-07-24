@@ -79,3 +79,34 @@ def iterative_removal(img_np):
             result[:,:,c] = result[:,:,c] * ratio
     
     return np.clip(result * 255, 0, 255).astype(np.uint8)
+
+def color_binarize(img_np):
+    """Color Binarize: clean background like binarize but preserve text color."""
+    # Step 1: Convert to LAB for better processing
+    lab = cv2.cvtColor(img_np, cv2.COLOR_RGB2LAB)
+    l, a, b = cv2.split(lab)
+    
+    # Step 2: Detect background using Otsu on L channel
+    _, bg_mask = cv2.threshold(l, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    
+    # Step 3: Invert — text is white in bg_mask
+    text_mask = cv2.bitwise_not(bg_mask)
+    
+    # Step 4: Clean up text mask
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    text_mask = cv2.morphologyEx(text_mask, cv2.MORPH_CLOSE, kernel, iterations=2)
+    text_mask = cv2.morphologyEx(text_mask, cv2.MORPH_OPEN, kernel, iterations=1)
+    
+    # Step 5: Create clean background (white)
+    bg_clean = np.ones_like(img_np) * 255
+    
+    # Step 6: Preserve original text colors
+    text_float = text_mask.astype(np.float32) / 255.0
+    text_float = cv2.GaussianBlur(text_float, (3, 3), 0)  # soft edges
+    
+    # Step 7: Merge — white background + colored text
+    result = bg_clean.astype(np.float32)
+    for c in range(3):
+        result[:,:,c] = bg_clean[:,:,c] * (1 - text_float) + img_np[:,:,c].astype(np.float32) * text_float
+    
+    return np.clip(result, 0, 255).astype(np.uint8)
