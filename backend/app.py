@@ -44,6 +44,8 @@ from backend.utils.traditional_shadow_methods import effective_bg_estimation, it
 from backend.models.shadow_remover import ShadowRemoverNet
 from backend.models.doc_enhancer import DocEnhancerNet
 
+from backend.models.docres_model import get_docres
+
 # --- Configuration ---
 BASE_DIR = Path(__file__).parent.parent
 CHECKPOINT_DIR = BASE_DIR / 'checkpoints'
@@ -114,6 +116,18 @@ def get_docshadow():
         except Exception as e:
             print(f"[WARN] DocShadow SD7K not available: {e}")
     return _docshadow
+
+
+# Lazy-load DocRes
+_docres = None
+def get_docres_model():
+    global _docres
+    if _docres is None:
+        try:
+            _docres = get_docres(device=str(device))
+        except Exception as e:
+            print(f"[WARN] DocRes not available: {e}")
+    return _docres
 
 
 # --- FastAPI Setup ---
@@ -328,6 +342,7 @@ def health_check():
             "shadow_remover": shadow_remover_model is not None,
             "doc_enhancer": doc_enhancer_model is not None,
             "docshadow_sd7k": docshadow is not None,
+            "docres": get_docres_model() is not None,
         },
     }
 
@@ -345,6 +360,11 @@ async def models_info(request: Request):
             info[name] = model.get_model_info()
         else:
             info[name] = {"loaded": model is not None}
+    docres_mdl = get_docres_model()
+    if docres_mdl:
+        info["docres"] = docres_mdl.get_model_info()
+    else:
+        info["docres"] = {"loaded": False}
     docshadow = get_docshadow()
     if docshadow:
         info["docshadow_sd7k"] = {"loaded": True, "weights": docshadow.list_available_weights()}
@@ -546,9 +566,18 @@ async def scan_document(request: Request, file: UploadFile = File(...), mode: st
         elapsed = round((time.time() - start) * 1000, 1)
         return _pil_to_response(result)
 
+    elif mode == "docres":
+        start = time.time()
+        docres = get_docres_model()
+        if docres is None:
+            raise HTTPException(status_code=503, detail="DocRes model not loaded")
+        result = docres.infer(image)
+        elapsed = round((time.time() - start) * 1000, 1)
+        return _pil_to_response(result)
+
     else:
         available = ["restore", "shadow_remove", "shadow_so", "shadow_so_aggressive", "shadow_effective_bg", "shadow_iterative", "color_binarize", "enhance", "magic_enhance", "binarize",
-                      "deskew", "cleanup", "clahe", "denoise", "sharpen"]
+                      "deskew", "cleanup", "clahe", "denoise", "sharpen", "docres"]
         raise HTTPException(status_code=400,
                             detail=f"Mode '{mode}' not available. Use one of: {available}")
 
@@ -596,6 +625,11 @@ async def serve_upload(filename: str, request: Request):
 @app.post("/api/docshadow/infer")
 async def docshadow_infer(request: Request, file: UploadFile = File(...), weight: str = Form("SD7K")):
     # require_api_auth(request)  # Public for image loading
+    docres_mdl = get_docres_model()
+    if docres_mdl:
+        info["docres"] = docres_mdl.get_model_info()
+    else:
+        info["docres"] = {"loaded": False}
     docshadow = get_docshadow()
     if docshadow is None:
         raise HTTPException(status_code=503, detail="DocShadow SD7K model not loaded")
@@ -614,10 +648,47 @@ async def docshadow_infer(request: Request, file: UploadFile = File(...), weight
 @app.get("/api/docshadow/weights")
 async def docshadow_weights(request: Request):
     # require_api_auth(request)  # Public for image loading
+    docres_mdl = get_docres_model()
+    if docres_mdl:
+        info["docres"] = docres_mdl.get_model_info()
+    else:
+        info["docres"] = {"loaded": False}
     docshadow = get_docshadow()
     if docshadow is None:
         return {"loaded": False, "weights": []}
     return {"loaded": True, "weights": docshadow.list_available_weights()}
+
+
+# =====================================================================
+#  DOCRES RESTORMER INFERENCE
+# =====================================================================
+@app.post("/api/docres/infer")
+async def docres_infer(request: Request, file: UploadFile = File(...)):
+    """Run DocRes Restormer shadow removal."""
+    global _docres
+    if _docres is None:
+        try:
+            _docres = get_docres(device=str(device))
+        except Exception as e:
+            raise HTTPException(status_code=503, detail=f"DocRes model not loaded: {e}")
+    image = _read_image(file)
+    try:
+        start = time.time()
+        result = _docres.infer(image)
+        elapsed = round((time.time() - start) * 1000, 1)
+        return _pil_to_response(result)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Inference error: {e}")
+
+
+@app.get("/api/docres/status")
+async def docres_status(request: Request):
+    global _docres
+    return {
+        "loaded": _docres is not None,
+        "checkpoint": _docres.checkpoint_name if _docres else None,
+        "im_size": _docres.im_size if _docres else None,
+    }
 
 
 # =====================================================================

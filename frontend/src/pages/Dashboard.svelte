@@ -50,6 +50,7 @@
   }
 
   const modes = [
+    { id: 'docres', icon: 'sparkles', label: 'AI DocRes' },
     { id: 'restore', icon: 'wand-2', label: 'AI Restore' },
     { id: 'shadow_remove', icon: 'sun-dim', label: 'Shadow Remove' },
     { id: 'shadow_effective_bg', icon: 'sun', label: 'Shadow BG Est.' },
@@ -60,9 +61,8 @@
     { id: 'enhance', icon: 'sparkles', label: 'AI Enhance' },
     { id: 'magic_enhance', icon: 'magic-wand', label: 'Magic Enhance' },
     { id: 'binarize', icon: 'contrast', label: 'Binarize' },
-    { id: color_binarize, icon: palette, label: Color Binarize },
+    { id: 'color_binarize', icon: 'palette', label: 'Color Binarize' },
     { id: 'cleanup', icon: 'brush-cleaning', label: 'Full Cleanup' },
-    { id: color_binarize, icon: palette, label: Color Binarize },
     { id: 'clahe', icon: 'sun', label: 'CLAHE' },
     { id: 'denoise', icon: 'shield-check', label: 'Denoise' },
     { id: 'sharpen', icon: 'focus', label: 'Sharpen' },
@@ -74,6 +74,7 @@
     try {
       const d = await apiJson('/api/health')
       stats.device = d.device || '?'
+      stats.docres = d.models?.docres ? 'Loaded' : 'Not loaded'
       stats.restorer = d.models?.document_restorer ? 'Loaded' : 'Not loaded'
       stats.shadow = d.models?.shadow_remover ? 'Loaded' : 'Not loaded'
       stats.enhancer = d.models?.doc_enhancer ? 'Loaded' : 'Not loaded'
