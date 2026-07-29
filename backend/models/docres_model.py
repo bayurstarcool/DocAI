@@ -286,7 +286,12 @@ class DocResModel:
         img_r = cv2.resize(img_np, (res, res))
         prompt_r = cv2.resize(prompt, (res, res))
         img_n = img_r.astype(np.float32) / 255.0
-        prompt_n = prompt_r.astype(np.float32) / 255.0
+        # Prompt normalization: deshadow/appearance/deblur prompts are uint8 images (0-255)
+        # Dewarping prompt is already normalized grid [0,1] + mask
+        if task == 'dewarping':
+            prompt_n = prompt_r.astype(np.float32)
+        else:
+            prompt_n = prompt_r.astype(np.float32) / 255.0
 
         in_6ch = torch.cat([
             torch.from_numpy(img_n.transpose(2, 0, 1)).unsqueeze(0),
@@ -329,7 +334,12 @@ class DocResModel:
             prompt_r = cv2.resize(prompt.astype(np.float32), (res, res))
 
         img_n = img_r.astype(np.float32) / 255.0
-        prompt_n = prompt_r.astype(np.float32) / 255.0
+        # Prompt normalization: deshadow/appearance/deblur prompts are uint8 images (0-255)
+        # Dewarping prompt is already normalized grid [0,1] + mask
+        if task == 'dewarping':
+            prompt_n = prompt_r.astype(np.float32)
+        else:
+            prompt_n = prompt_r.astype(np.float32) / 255.0
 
         in_6ch = torch.cat([
             torch.from_numpy(img_n.transpose(2, 0, 1)).unsqueeze(0),

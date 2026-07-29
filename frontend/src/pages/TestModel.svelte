@@ -29,7 +29,7 @@
   let selectedCheckpoint = 'checkpoints/document_restorer/best.pth'
   let loadedCheckpoint = ''
 
-  const modes = ["restore","docres_base","docres_finetune","docres_onnx","docres_dewarping","docres_appearance","docres_deblurring","magic_enhance","binarize","cleanup","clahe","denoise","sharpen","deskew"]
+  const modes = ["restore","docres_base","docres_finetune","docres_onnx","docres_dewarping","docres_appearance","docres_deblurring","docres_end2end","magic_enhance","binarize","cleanup","clahe","denoise","sharpen","deskew"]
   const pipelineModes = [
     { value: 'full', label: 'Full Pipeline', desc: 'AI + white balance + whitening + CLAHE' },
     { value: 'ai_only', label: 'AI Only', desc: 'Model output langsung, warna terjaga' },
@@ -37,7 +37,7 @@
     { value: 'color', label: 'AI + CLAHE', desc: 'AI + contrast enhancement, tanpa white balance' },
   ]
   const pretrainedModes = ['SD7K', 'Jung', 'Kligler'].map(name => ({ name }))
-  const modeLabels = { restore: "AI Restore", docres_base: "DocRes Base", docres_finetune: "DocRes Finetune", docres_onnx: "DocRes ONNX", docres_dewarping: "DocRes Dewarping", docres_appearance: "DocRes Appearance", docres_deblurring: "DocRes Deblurring", magic_enhance: "Magic Enhance", binarize: "Binarize", cleanup: "Full Cleanup", clahe: "CLAHE", denoise: "Denoise", sharpen: "Sharpen", deskew: "Deskew" }
+  const modeLabels = { restore: "AI Restore", docres_base: "DocRes Base", docres_finetune: "DocRes Finetune", docres_onnx: "DocRes ONNX", docres_dewarping: "DocRes Dewarping", docres_appearance: "DocRes Appearance", docres_deblurring: "DocRes Deblurring", docres_end2end: "DocRes End2End (Dewarp+Deshadow+Appear)", magic_enhance: "Magic Enhance", binarize: "Binarize", cleanup: "Full Cleanup", clahe: "CLAHE", denoise: "Denoise", sharpen: "Sharpen", deskew: "Deskew" }
   $: availableDocshadowNames = new Set(docshadowWeights.map(w => w.name))
   $: docshadowModes = pretrainedModes.map(w => `docshadow:${w.name}`)
   $: allModeLabels = {

@@ -996,6 +996,13 @@ async def scan_document(request: Request, file: UploadFile = File(...), mode: st
         elapsed = round((time.time() - start) * 1000, 1)
         return _pil_to_response(result)
 
+    elif mode == "docres_end2end":
+        from backend.docres_infer import docres_infer
+        start = time.time()
+        result = docres_infer(image, 'end2end')
+        elapsed = round((time.time() - start) * 1000, 1)
+        return _pil_to_response(result)
+
     elif mode == "color_binarize":
         start = time.time()
         img_np = np.array(image.convert("RGB"))
