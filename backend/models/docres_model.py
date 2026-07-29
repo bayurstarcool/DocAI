@@ -123,7 +123,12 @@ def _get_mbd_model(device='cuda'):
         seg_model = _mbd_deeplab_class(num_classes=1, backbone='resnet', output_stride=16, sync_bn=None, freeze_bn=False)
         seg_model = seg_model.to(device)
         ckpt = torch.load(str(DOCRES_DIR / 'data' / 'MBD' / 'checkpoint' / 'mbd.pkl'), map_location=device)
-        seg_model.load_state_dict(ckpt['model_state'])
+        state = ckpt.get('model_state', ckpt)
+        # Strip 'module.' prefix if present (DataParallel save)
+        keys = list(state.keys())
+        if keys and all(k.startswith('module.') for k in keys):
+            state = {k[7:]: v for k, v in state.items()}
+        seg_model.load_state_dict(state)
         seg_model.eval()
         _mbd_model = seg_model
         _mbd_device = device
@@ -152,7 +157,7 @@ def dewarp_prompt(img, device='cuda'):
         mask[mask < 100] = 0
 
     # Base coordinate grid for TPS
-    base_coord = _docres_utils.getBasecoord(256, 256).numpy() / 256
+    base_coord = _docres_utils.getBasecoord(256, 256) / 256
     img_masked = img.copy()
     img_masked[mask == 0] = 0
     mask_r = cv2.resize(mask, (256, 256)) / 255.0
@@ -335,7 +340,7 @@ class DocResModel:
 
             if task == 'dewarping':
                 # Dewarping output needs remapping
-                base_coord = _docres_utils.getBasecoord(res, res).numpy() / res
+                base_coord = _docres_utils.getBasecoord(res, res) / res
                 pred_flow = pred_np[:, :, :2].astype(np.float32) + base_coord
                 for _ in range(15):
                     pred_flow = cv2.blur(pred_flow, (3, 3), borderType=cv2.BORDER_REPLICATE)
