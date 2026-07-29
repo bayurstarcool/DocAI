@@ -136,32 +136,32 @@ def _get_mbd_model(device='cuda'):
     return _mbd_model
 
 
+def _release_mbd():
+    global _mbd_model, _mbd_device
+    if _mbd_model is not None:
+        del _mbd_model
+        _mbd_model = None
+        _mbd_device = None
+        import gc
+        gc.collect()
+        torch.cuda.empty_cache()
+
+
 def dewarp_prompt(img, device='cuda'):
-    seg_model = _get_mbd_model(device)
+    # Use original MBD inference function
+    import sys as _sys
+    _sys.path.insert(0, str(DOCRES_DIR / 'data' / 'MBD'))
+    from infer import net1_net2_infer_single_im
+    
     h_org, w_org = img.shape[:2]
-    img_448 = cv2.resize(img, (448, 448))
-    img_448 = cv2.GaussianBlur(img_448, (15, 15), 0, 0)
-    img_448 = cv2.cvtColor(img_448, cv2.COLOR_BGR2RGB)
-    img_t = torch.from_numpy(img_448.transpose(2, 0, 1)).float().unsqueeze(0).to(device) / 255.0
-
-    with torch.no_grad():
-        pred = seg_model(img_t)
-        mask = pred[:, 0, :, :].unsqueeze(1)
-        mask = F.interpolate(mask, (h_org, w_org), mode='bilinear')
-        mask = mask.squeeze().cpu().numpy()
-        mask = (mask * 255).astype(np.uint8)
-        kernel = np.ones((3, 3), np.uint8)
-        mask = cv2.dilate(mask, kernel, iterations=3)
-        mask = cv2.erode(mask, kernel, iterations=3)
-        mask[mask > 100] = 255
-        mask[mask < 100] = 0
-
-    # Base coordinate grid for TPS
+    mask = net1_net2_infer_single_im(img, str(DOCRES_DIR / 'data' / 'MBD' / 'checkpoint' / 'mbd.pkl'))
+    
     base_coord = _docres_utils.getBasecoord(256, 256) / 256
     img_masked = img.copy()
     img_masked[mask == 0] = 0
     mask_r = cv2.resize(mask, (256, 256)) / 255.0
     prompt = np.concatenate([base_coord, np.expand_dims(mask_r, -1)], axis=-1)
+    _release_mbd()
     return img_masked, prompt
 
 
@@ -311,7 +311,10 @@ class DocResModel:
         else:
             raise ValueError(f'Unsupported type: {type(img)}')
 
-        res = im_size or self.im_size
+        if task == 'dewarping':
+            res = 256  # Fixed 256x256 for dewarping flow
+        else:
+            res = im_size or self.im_size
         orig_h, orig_w = img_np.shape[:2]
 
         # Generate task-specific prompt
@@ -333,22 +336,34 @@ class DocResModel:
             torch.from_numpy(prompt_n.transpose(2, 0, 1)).unsqueeze(0)
         ], dim=1).to(self.device).float()
 
+        torch.cuda.empty_cache()
         with torch.no_grad():
             pred = self.model(in_6ch)
-            pred_np = pred.squeeze(0).cpu().clamp(0, 1).numpy()
-            pred_np = (pred_np.transpose(1, 2, 0) * 255).astype(np.uint8)
 
             if task == 'dewarping':
-                # Dewarping output needs remapping
-                base_coord = _docres_utils.getBasecoord(res, res) / res
-                pred_flow = pred_np[:, :, :2].astype(np.float32) + base_coord
+                # Model output: flow offset + residual RGB
+                # Only first 2 channels are flow offset at 256x256 resolution
+                INPUT_SIZE = 256
+                pred_flow = pred[0, :2].cpu().numpy()  # (2, INPUT_SIZE, INPUT_SIZE)
+                # Base coordinate grid [0, INPUT_SIZE-1], normalized to [0, 1]
+                base_coord = _docres_utils.getBasecoord(INPUT_SIZE, INPUT_SIZE) / INPUT_SIZE
+                # Flow = offset + grid → normalized coordinates
+                flow = pred_flow.transpose(1, 2, 0).astype(np.float32) + base_coord  # (256, 256, 2)
+                # Smooth
                 for _ in range(15):
-                    pred_flow = cv2.blur(pred_flow, (3, 3), borderType=cv2.BORDER_REPLICATE)
-                pred_flow = cv2.resize(pred_flow, (orig_w, orig_h)) * (orig_w, orig_h)
+                    flow = cv2.blur(flow, (3, 3), borderType=cv2.BORDER_REPLICATE)
+                # Resize flow to original image dims, then scale to pixel coords
+                flow = cv2.resize(flow, (orig_w, orig_h)).astype(np.float32)
+                flow[:, :, 0] *= orig_w
+                flow[:, :, 1] *= orig_h
+                # Clip to image bounds
+                np.clip(flow[:, :, 0], 0, orig_w - 1, out=flow[:, :, 0])
+                np.clip(flow[:, :, 1], 0, orig_h - 1, out=flow[:, :, 1])
                 orig_bgr = np.array(img.convert('RGB'))[:, :, ::-1] if isinstance(img, Image.Image) else img_np
-                pred_full = cv2.remap(orig_bgr, pred_flow[:, :, 0].astype(np.float32),
-                                      pred_flow[:, :, 1].astype(np.float32), cv2.INTER_LINEAR)
+                pred_full = cv2.remap(orig_bgr, flow[:, :, 0], flow[:, :, 1], cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
             else:
+                pred_np = pred.squeeze(0).cpu().clamp(0, 1).numpy()
+                pred_np = (pred_np.transpose(1, 2, 0) * 255).astype(np.uint8)
                 pred_full = cv2.resize(pred_np, (orig_w, orig_h), interpolation=cv2.INTER_CUBIC)
 
         return Image.fromarray(cv2.cvtColor(pred_full, cv2.COLOR_BGR2RGB))
