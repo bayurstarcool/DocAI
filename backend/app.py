@@ -164,6 +164,27 @@ def get_docres_onnx_model():
     return _docres_onnx
 
 
+_docres_task = None
+def get_docres_task_model():
+    global _docres_task
+    if _docres_task is None:
+        base = get_docres_base_model()
+        if base is None:
+            try:
+                base = get_docres(device=str(device))
+            except Exception as e:
+                print(f"[WARN] DocRes task model not available: {e}")
+        _docres_task = base
+    return _docres_task
+
+
+def docres_task_infer(img, task='deshadowing'):
+    mdl = get_docres_task_model()
+    if mdl is None:
+        raise HTTPException(status_code=500, detail=f"DocRes not loaded")
+    return mdl.infer_task(img, task)
+
+
 # --- FastAPI Setup ---
 spa_dist = BASE_DIR / 'frontend' / 'dist'
 @app.get("/opencv.js")
@@ -954,6 +975,24 @@ async def scan_document(request: Request, file: UploadFile = File(...), mode: st
         if mdl is None:
             raise HTTPException(status_code=500, detail="DocRes ONNX model not loaded")
         result = mdl.infer(image)
+        elapsed = round((time.time() - start) * 1000, 1)
+        return _pil_to_response(result)
+
+    elif mode == "docres_dewarping":
+        start = time.time()
+        result = docres_task_infer(image, 'dewarping')
+        elapsed = round((time.time() - start) * 1000, 1)
+        return _pil_to_response(result)
+
+    elif mode == "docres_appearance":
+        start = time.time()
+        result = docres_task_infer(image, 'appearance')
+        elapsed = round((time.time() - start) * 1000, 1)
+        return _pil_to_response(result)
+
+    elif mode == "docres_deblurring":
+        start = time.time()
+        result = docres_task_infer(image, 'deblurring')
         elapsed = round((time.time() - start) * 1000, 1)
         return _pil_to_response(result)
 

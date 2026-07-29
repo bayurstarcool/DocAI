@@ -16,9 +16,29 @@ import numpy as np
 import cv2
 from PIL import Image
 import onnxruntime as ort
+import sys
+from torch.nn import functional as F
+
+DOCRES_DIR = Path('/home/wahyu/DocRes')
+
+# Lazy MBD loader (import only when needed)
+def _load_deeplab():
+    sys.path.insert(0, str(DOCRES_DIR / 'data' / 'MBD'))
+    from model.deep_lab_model.deeplab import DeepLab
+    return DeepLab
+
+_mbd_available = False
+_mbd_deeplab_class = None
+try:
+    _mbd_deeplab_class = _load_deeplab()
+    _mbd_available = True
+except Exception:
+    print('[WARN] MBD/Deeplab not available - dewarping disabled')
+
 
 
 DOCRES_DIR = Path('/home/wahyu/DocRes')
+sys.path.insert(0, str(DOCRES_DIR))
 
 FINETUNE_CHECKPOINTS = {
     'finetune_v1': DOCRES_DIR / 'finetune_logs' / 'best.pth',
@@ -59,6 +79,98 @@ def deshadow_prompt(img):
         bg = cv2.medianBlur(dilated, 21)
         bg_imgs.append(bg)
     return cv2.resize(cv2.merge(bg_imgs), (w, h))
+
+
+def appearance_prompt(img):
+    h, w = img.shape[:2]
+    img_r = cv2.resize(img, (1024, 1024))
+    result_norm_planes = []
+    for plane in cv2.split(img_r):
+        dilated = cv2.dilate(plane, np.ones((7, 7), np.uint8))
+        bg = cv2.medianBlur(dilated, 21)
+        diff = 255 - cv2.absdiff(plane, bg)
+        norm = cv2.normalize(diff, None, alpha=0, beta=255, norm_type=cv2.NORM_MINMAX, dtype=cv2.CV_8UC1)
+        result_norm_planes.append(norm)
+    result_norm = cv2.merge(result_norm_planes)
+    result_norm = cv2.resize(result_norm, (w, h))
+    return result_norm
+
+
+def deblur_prompt(img):
+    h, w = img.shape[:2]
+    x = cv2.Sobel(img, cv2.CV_16S, 1, 0)
+    y = cv2.Sobel(img, cv2.CV_16S, 0, 1)
+    absX = cv2.convertScaleAbs(x)
+    absY = cv2.convertScaleAbs(y)
+    hf = cv2.addWeighted(absX, 0.5, absY, 0.5, 0)
+    hf = cv2.cvtColor(hf, cv2.COLOR_BGR2GRAY)
+    hf = cv2.cvtColor(hf, cv2.COLOR_GRAY2BGR)
+    hf = cv2.resize(hf, (w, h))
+    return hf
+
+
+# MBD model singleton for dewarping
+_mbd_model = None
+_mbd_device = None
+
+def _get_mbd_model(device='cuda'):
+    global _mbd_model, _mbd_device
+    if not _mbd_available:
+        raise RuntimeError("MBD model (DeepLab) not available - torchvision missing or import failed")
+    if _mbd_model is None or _mbd_device != device:
+        if _mbd_deeplab_class is None:
+            raise RuntimeError('MBD model not loaded')
+        seg_model = _mbd_deeplab_class(num_classes=1, backbone='resnet', output_stride=16, sync_bn=None, freeze_bn=False)
+        seg_model = seg_model.to(device)
+        ckpt = torch.load(str(DOCRES_DIR / 'data' / 'MBD' / 'checkpoint' / 'mbd.pkl'), map_location=device)
+        seg_model.load_state_dict(ckpt['model_state'])
+        seg_model.eval()
+        _mbd_model = seg_model
+        _mbd_device = device
+        print(f"[OK] MBD model loaded, device={device}")
+    return _mbd_model
+
+
+def dewarp_prompt(img, device='cuda'):
+    seg_model = _get_mbd_model(device)
+    h_org, w_org = img.shape[:2]
+    img_448 = cv2.resize(img, (448, 448))
+    img_448 = cv2.GaussianBlur(img_448, (15, 15), 0, 0)
+    img_448 = cv2.cvtColor(img_448, cv2.COLOR_BGR2RGB)
+    img_t = torch.from_numpy(img_448.transpose(2, 0, 1)).float().unsqueeze(0).to(device) / 255.0
+
+    with torch.no_grad():
+        pred = seg_model(img_t)
+        mask = pred[:, 0, :, :].unsqueeze(1)
+        mask = F.interpolate(mask, (h_org, w_org), mode='bilinear')
+        mask = mask.squeeze().cpu().numpy()
+        mask = (mask * 255).astype(np.uint8)
+        kernel = np.ones((3, 3), np.uint8)
+        mask = cv2.dilate(mask, kernel, iterations=3)
+        mask = cv2.erode(mask, kernel, iterations=3)
+        mask[mask > 100] = 255
+        mask[mask < 100] = 0
+
+    # Base coordinate grid for TPS
+    base_coord = _docres_utils.getBasecoord(256, 256).numpy() / 256
+    img_masked = img.copy()
+    img_masked[mask == 0] = 0
+    mask_r = cv2.resize(mask, (256, 256)) / 255.0
+    prompt = np.concatenate([base_coord, np.expand_dims(mask_r, -1)], axis=-1)
+    return img_masked, prompt
+
+
+def _make_task_prompt(img_np, task, device='cuda'):
+    if task == 'deshadowing':
+        return deshadow_prompt(img_np), img_np
+    elif task == 'appearance':
+        return appearance_prompt(img_np), img_np
+    elif task == 'deblurring':
+        return deblur_prompt(img_np), img_np
+    elif task == 'dewarping':
+        im_masked, prompt = dewarp_prompt(img_np, device)
+        return prompt, im_masked
+    return deshadow_prompt(img_np), img_np
 
 
 def build_model():
@@ -182,6 +294,68 @@ class DocResModel:
         pred_full = cv2.resize(pred_np, (orig_w, orig_h), interpolation=cv2.INTER_CUBIC)
 
         return Image.fromarray(cv2.cvtColor(pred_full, cv2.COLOR_BGR2RGB))
+
+    def infer_task(self, img, task='deshadowing', im_size=None):
+        """Infer with specific task prompt. task: deshadowing, appearance, deblurring, dewarping"""
+        if isinstance(img, Image.Image):
+            img_np = cv2.cvtColor(np.array(img.convert('RGB')), cv2.COLOR_RGB2BGR)
+        elif isinstance(img, np.ndarray):
+            img_np = img
+            if img_np.dtype != np.uint8:
+                img_np = (img_np * 255).astype(np.uint8)
+        else:
+            raise ValueError(f'Unsupported type: {type(img)}')
+
+        res = im_size or self.im_size
+        orig_h, orig_w = img_np.shape[:2]
+
+        # Generate task-specific prompt
+        if task == 'dewarping':
+            prompt, img_input = _make_task_prompt(img_np, 'dewarping', device=str(self.device))
+            # For dewarping, prompt is (256,256,3) and img_input is masked
+            img_r = cv2.resize(img_input, (res, res))
+            prompt_r = cv2.resize(prompt.astype(np.float32), (res, res))
+        else:
+            prompt, img_input = _make_task_prompt(img_np, task, device=str(self.device))
+            img_r = cv2.resize(img_np, (res, res))
+            prompt_r = cv2.resize(prompt.astype(np.float32), (res, res))
+
+        img_n = img_r.astype(np.float32) / 255.0
+        prompt_n = prompt_r.astype(np.float32) / 255.0
+
+        in_6ch = torch.cat([
+            torch.from_numpy(img_n.transpose(2, 0, 1)).unsqueeze(0),
+            torch.from_numpy(prompt_n.transpose(2, 0, 1)).unsqueeze(0)
+        ], dim=1).to(self.device).float()
+
+        with torch.no_grad():
+            pred = self.model(in_6ch)
+            pred_np = pred.squeeze(0).cpu().clamp(0, 1).numpy()
+            pred_np = (pred_np.transpose(1, 2, 0) * 255).astype(np.uint8)
+
+            if task == 'dewarping':
+                # Dewarping output needs remapping
+                base_coord = _docres_utils.getBasecoord(res, res).numpy() / res
+                pred_flow = pred_np[:, :, :2].astype(np.float32) + base_coord
+                for _ in range(15):
+                    pred_flow = cv2.blur(pred_flow, (3, 3), borderType=cv2.BORDER_REPLICATE)
+                pred_flow = cv2.resize(pred_flow, (orig_w, orig_h)) * (orig_w, orig_h)
+                orig_bgr = np.array(img.convert('RGB'))[:, :, ::-1] if isinstance(img, Image.Image) else img_np
+                pred_full = cv2.remap(orig_bgr, pred_flow[:, :, 0].astype(np.float32),
+                                      pred_flow[:, :, 1].astype(np.float32), cv2.INTER_LINEAR)
+            else:
+                pred_full = cv2.resize(pred_np, (orig_w, orig_h), interpolation=cv2.INTER_CUBIC)
+
+        return Image.fromarray(cv2.cvtColor(pred_full, cv2.COLOR_BGR2RGB))
+
+    def infer_dewarping(self, img, im_size=None):
+        return self.infer_task(img, 'dewarping', im_size)
+
+    def infer_appearance(self, img, im_size=None):
+        return self.infer_task(img, 'appearance', im_size)
+
+    def infer_deblurring(self, img, im_size=None):
+        return self.infer_task(img, 'deblurring', im_size)
 
     def get_model_info(self):
         params = sum(p.numel() for p in self.model.parameters())
