@@ -11,6 +11,8 @@
   let newName = ""
   let newDesc = ""
   let creating = false
+  let page = 1
+  let pageSize = 9
   let error = null
 
   onMount(loadDatasets)
@@ -23,13 +25,18 @@
         headers: { Authorization: `Bearer ${localStorage.getItem("token") || ""}` }
       })
       const data = await res.json()
-      datasets = data.datasets || []
+      datasets = (data.datasets || []).sort((a,b) => (b.updated_at || 0) - (a.updated_at || 0))
+      page = 1
     } catch (e) {
       error = e.message
     } finally {
       loading = false
     }
   }
+
+  $: totalPages = Math.max(1, Math.ceil(datasets.length / pageSize))
+  $: if (page > totalPages) page = totalPages
+  $: pagedDatasets = datasets.slice((page - 1) * pageSize, page * pageSize)
 
   async function createDataset() {
     if (!newSlug.trim()) return
@@ -120,7 +127,7 @@
     </div>
   {:else}
     <div class="grid">
-      {#each datasets as ds}
+      {#each pagedDatasets as ds}
         <div class="ds-card" onclick={() => navigate(`/dataset-manager/${ds.slug}`)}>
           <div class="ds-top">
             <span class="ds-status" class:ready={ds.status === 'ready'}>{ds.status}</span>
@@ -141,6 +148,11 @@
           <p class="ds-date">{ds.created_at}</p>
         </div>
       {/each}
+    </div>
+    <div class="pagination">
+      <button disabled={page <= 1} onclick={() => page--}>Sebelumnya</button>
+      <span>Halaman {page} / {totalPages} · {datasets.length} dataset</span>
+      <button disabled={page >= totalPages} onclick={() => page++}>Berikutnya</button>
     </div>
   {/if}
 </div>
@@ -176,6 +188,9 @@
   .btn-icon.danger:hover { color: #ef4444; }
   .alert { padding: 0.75rem 1rem; border-radius: var(--radius-xs); margin-bottom: 1rem; font-size: 0.85rem; }
   .alert.error { background: rgba(239,68,68,0.1); color: #ef4444; border: 1px solid rgba(239,68,68,0.3); }
+  .pagination { display:flex; justify-content:center; align-items:center; gap:.75rem; margin-top:1.25rem; color:var(--text2); font-size:.8rem; }
+  .pagination button { padding:.4rem .75rem; border:1px solid var(--border); background:var(--bg2); color:var(--text); border-radius:6px; cursor:pointer; }
+  .pagination button:disabled { opacity:.4; cursor:not-allowed; }
   .loading { color: var(--text2); }
   .empty { text-align: center; padding: 3rem; color: var(--text2); }
   .empty .hint { font-size: 0.85rem; margin-top: 0.5rem; }

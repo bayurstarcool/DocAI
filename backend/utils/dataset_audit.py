@@ -149,36 +149,36 @@ def audit_pair(shadow_path: str, clean_path: str) -> Dict:
     score = 0
     reasons = []
 
-    # Shadow must be present (shadow_pct > 5%)
-    if shadow_pct > 5:
+    # Shadow must be present (shadow_pct > 10%)
+    if shadow_pct > 10:
         score += 25
     else:
-        reasons.append("Shadow terlalu sedikit (<5%)")
+        reasons.append("Bayangan kurang banyak. Pastikan shadow menutupi >10% area dokumen.")
 
     # Clean should be brighter than shadow
     if luma_clean.mean() > luma_shadow.mean() + 10:
         score += 20
     else:
-        reasons.append("Clean tidak cukup terang dari shadow")
+        reasons.append("Foto clean harus lebih terang dari shadow. Gunakan pencahayaan cukup pada foto clean.")
 
     # Shadow image should have more dark pixels
     if shadow_pct > clean_dark_pct + 3:
         score += 15
     else:
-        reasons.append("Shadow tidak cukup berbeda dari clean")
+        reasons.append("Bayangan kurang terlihat. Foto shadow harus memiliki bayangan yang jelas berbeda dari clean.")
 
     # Alignment should be good
-    if align_meta["success"] and align_meta["inliers"] > 50:
+    if align_meta["success"] and align_meta["inliers"] > 100:
         score += 20
     elif align_meta["success"]:
         score += 10
-        reasons.append("Alignment kurang presisi")
+        reasons.append("Posisi foto shadow dan clean agak bergeser. Usahakan framing yang sama.")
     else:
-        reasons.append("Alignment gagal")
+        reasons.append("Posisi foto shadow dan clean tidak cocok. Ambil foto dari sudut yang sama persis.")
 
     # Resolution difference
     res_diff = abs(shadow_w * shadow_h - clean_w * clean_h) / (clean_w * clean_h) * 100
-    if res_diff < 10:
+    if res_diff < 5:
         score += 10
     elif res_diff < 50:
         score += 5
@@ -190,14 +190,14 @@ def audit_pair(shadow_path: str, clean_path: str) -> Dict:
     if abs(color_diff["R"]["diff"]) > 10 or abs(color_diff["G"]["diff"]) > 10:
         score += 10
     else:
-        reasons.append("Color difference terlalu kecil")
+        reasons.append("Perbedaan warna shadow dan clean terlalu kecil. Pastikan shadow mengubah warna dokumen.")
 
     # Grade
-    if score >= 80:
+    if score >= 90:
         grade = "A"
-    elif score >= 60:
+    elif score >= 75:
         grade = "B"
-    elif score >= 40:
+    elif score >= 55:
         grade = "C"
     else:
         grade = "D"
@@ -251,7 +251,7 @@ def get_next_pair_number(output_dir: str) -> int:
 
 
 def prepare_pair(shadow_path: str, clean_path: str, output_dir: str,
-                 target_size: Tuple[int, int] = (768, 768),
+                 target_size: Tuple[int, int] = (1024, 1024),
                  align: bool = True) -> Dict:
     """
     Prepare a shadow/clean pair for training:
@@ -271,7 +271,7 @@ def prepare_pair(shadow_path: str, clean_path: str, output_dir: str,
     pair_name = f"pair_{pair_num:04d}"
 
     # Resize maintaining aspect ratio, max dimension = max_size
-    def resize_max(img, max_size=768):
+    def resize_max(img, max_size=1024):
         ih, iw = img.shape[:2]
         if max(ih, iw) <= max_size:
             return img
@@ -280,8 +280,8 @@ def prepare_pair(shadow_path: str, clean_path: str, output_dir: str,
         new_h = int(ih * scale)
         return cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_LANCZOS4)
 
-    clean_resized = resize_max(clean_img, 768)
-    shadow_resized = resize_max(shadow_img, 768)
+    clean_resized = resize_max(clean_img, 1024)
+    shadow_resized = resize_max(shadow_img, 1024)
 
     # Align shadow to clean if requested
     align_meta = {}
@@ -306,7 +306,7 @@ def prepare_pair(shadow_path: str, clean_path: str, output_dir: str,
 
 
 def prepare_dataset(shadow_dir: str, clean_dir: str, output_dir: str,
-                    target_size: Tuple[int, int] = (768, 768),
+                    target_size: Tuple[int, int] = (1024, 1024),
                     align: bool = True) -> Dict:
     """
     Prepare an entire dataset of shadow/clean pairs.
@@ -413,6 +413,7 @@ def list_datasets() -> List[Dict]:
         return []
 
     datasets = []
+    image_exts = (".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp")
     for slug in sorted(os.listdir(base)):
         ds_path = os.path.join(base, slug)
         if not os.path.isdir(ds_path):
@@ -420,8 +421,8 @@ def list_datasets() -> List[Dict]:
         meta = _load_meta(ds_path)
         input_dir = os.path.join(ds_path, "input")
         target_dir = os.path.join(ds_path, "target")
-        input_count = len([f for f in os.listdir(input_dir) if f.endswith(('.png', '.jpg', '.jpeg'))]) if os.path.exists(input_dir) else 0
-        target_count = len([f for f in os.listdir(target_dir) if f.endswith(('.png', '.jpg', '.jpeg'))]) if os.path.exists(target_dir) else 0
+        input_count = len([f for f in os.listdir(input_dir) if f.lower().endswith(image_exts)]) if os.path.exists(input_dir) else 0
+        target_count = len([f for f in os.listdir(target_dir) if f.lower().endswith(image_exts)]) if os.path.exists(target_dir) else 0
 
         datasets.append({
             "slug": slug,
@@ -431,10 +432,12 @@ def list_datasets() -> List[Dict]:
             "target_count": target_count,
             "paired_count": min(input_count, target_count),
             "created_at": meta.get("created_at", ""),
-            "target_size": meta.get("target_size", "768,768"),
+            "updated_at": os.path.getmtime(ds_path),
+            "target_size": meta.get("target_size", "1024,1024"),
             "status": "ready" if min(input_count, target_count) > 0 else "empty",
         })
 
+    datasets.sort(key=lambda item: item.get("updated_at", 0), reverse=True)
     return datasets
 
 
@@ -448,19 +451,29 @@ def get_dataset(slug: str) -> Optional[Dict]:
     input_dir = os.path.join(ds_path, "input")
     target_dir = os.path.join(ds_path, "target")
 
-    input_files = sorted([f for f in os.listdir(input_dir) if f.endswith(('.png', '.jpg', '.jpeg'))]) if os.path.exists(input_dir) else []
-    target_files = sorted([f for f in os.listdir(target_dir) if f.endswith(('.png', '.jpg', '.jpeg'))]) if os.path.exists(target_dir) else []
+    image_exts = (".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp")
+    input_files = [f for f in os.listdir(input_dir) if f.lower().endswith(image_exts)] if os.path.exists(input_dir) else []
+    target_files = [f for f in os.listdir(target_dir) if f.lower().endswith(image_exts)] if os.path.exists(target_dir) else []
+    target_by_stem = {Path(f).stem: f for f in target_files}
+    input_files.sort(key=lambda f: os.path.getmtime(os.path.join(input_dir, f)), reverse=True)
 
     pairs = []
     for inp in input_files:
         stem = Path(inp).stem
-        tgt = f"{stem}.png"
-        has_target = tgt in target_files
+        tgt = target_by_stem.get(stem)
+        has_target = tgt is not None
+        input_path = os.path.join(input_dir, inp)
+        target_path = os.path.join(target_dir, tgt) if has_target else None
+        updated_at = max(
+            os.path.getmtime(input_path),
+            os.path.getmtime(target_path) if target_path else 0
+        )
         pairs.append({
             "name": stem,
             "input": f"input/{inp}",
             "target": f"target/{tgt}" if has_target else None,
             "paired": has_target,
+            "updated_at": updated_at,
         })
 
     return {
@@ -468,7 +481,7 @@ def get_dataset(slug: str) -> Optional[Dict]:
         "name": meta.get("name", slug),
         "description": meta.get("description", ""),
         "created_at": meta.get("created_at", ""),
-        "target_size": meta.get("target_size", "768,768"),
+        "target_size": meta.get("target_size", "1024,1024"),
         "input_count": len(input_files),
         "target_count": len(target_files),
         "paired_count": sum(1 for p in pairs if p["paired"]),
@@ -476,7 +489,7 @@ def get_dataset(slug: str) -> Optional[Dict]:
     }
 
 
-def create_dataset(slug: str, name: str = "", description: str = "", target_size: str = "768,768") -> Dict:
+def create_dataset(slug: str, name: str = "", description: str = "", target_size: str = "1024,1024") -> Dict:
     """Create a new empty dataset."""
     # Sanitize slug
     slug = slug.lower().strip().replace(" ", "-").replace("_", "-")
@@ -690,11 +703,11 @@ def validate_pair(input_path: str, target_path: str) -> Dict:
         issues.append("Input kurang variasi warna")
 
     # Grade
-    if score >= 85:
+    if score >= 90:
         grade = "A"
-    elif score >= 70:
+    elif score >= 75:
         grade = "B"
-    elif score >= 50:
+    elif score >= 55:
         grade = "C"
     elif score >= 30:
         grade = "D"

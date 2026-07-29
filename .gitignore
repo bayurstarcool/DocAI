@@ -37,3 +37,12 @@ models/
 # Nested repo metadata
 **/.git/
 .git_nested_backup/
+backend/app.py.bak_adjust
+backend/interns.json
+frontend/src/pages/TestModel.svelte.bak_adjust
+start_cpu.sh
+start_docai.sh
+frontend/dist/
+*.pyc
+__pycache__/
+.env

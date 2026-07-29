@@ -11,6 +11,10 @@
   import Datasets from './pages/Datasets.svelte'
   import DatasetManager from './pages/DatasetManager.svelte'
   import DatasetDetail from './pages/DatasetDetail.svelte'
+  import DocResTraining from './pages/DocResTraining.svelte'
+  import SyntheticShadow from './pages/SyntheticShadow.svelte'
+import Magang from './pages/Magang.svelte'
+import MagangReview from './pages/MagangReview.svelte'
 
   onMount(() => {
     initRouter()
@@ -27,6 +31,8 @@
     <TestModel />
   {:else if $currentRoute === '/train'}
     <Training />
+  {:else if $currentRoute === '/docres'}
+    <DocResTraining />
   {:else if $currentRoute === '/image-tests'}
     <ImageTests />
   {:else if $currentRoute === '/datasets' || $currentRoute.startsWith('/datasets/')}
@@ -35,6 +41,12 @@
     <DatasetManager />
   {:else if $currentRoute.startsWith('/dataset-manager/')}
     <DatasetDetail />
+  {:else if $currentRoute === '/synthetic-shadow'}
+    <SyntheticShadow />
+  {:else if $currentRoute === '/magang'}
+    <Magang />
+  {:else if $currentRoute === '/magang-review'}
+    <MagangReview />
   {:else}
     <Dashboard />
   {/if}

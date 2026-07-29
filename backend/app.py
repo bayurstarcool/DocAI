@@ -27,7 +27,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from backend.utils.image_utils import run_document_restoration_pipeline, run_tiled_restoration
 from backend.models.document_restorer import DocumentRestorerNet
-from backend.auth import ADMIN_CREDENTIALS, create_token, is_authenticated
+from backend.auth import ADMIN_CREDENTIALS, create_token, is_authenticated, register_intern, validate_intern, validate_token_any, get_token_from_request, validate_token
 from backend.workspace import WorkspaceError, resolve_workspace_path, safe_workspace_name
 from backend.utils.traditional_methods import (
     deskew_document, remove_color_cast, adaptive_threshold_document,
@@ -44,7 +44,11 @@ from backend.utils.traditional_shadow_methods import effective_bg_estimation, it
 from backend.models.shadow_remover import ShadowRemoverNet
 from backend.models.doc_enhancer import DocEnhancerNet
 
-from backend.models.docres_model import get_docres
+from backend.models.docres_model import get_docres, get_docres_base, get_docres_finetune, DocResONNX
+from backend.utils.image_adjust import apply_adjustments
+import contextvars
+_ADJUST_CTX = contextvars.ContextVar("adjust_ctx", default=None)
+
 
 # --- Configuration ---
 BASE_DIR = Path(__file__).parent.parent
@@ -130,10 +134,44 @@ def get_docres_model():
     return _docres
 
 
+# Lazy-load DocRes variants
+_docres_base = None
+def get_docres_base_model():
+    global _docres_base
+    if _docres_base is None:
+        try: _docres_base = get_docres_base(device=str(device))
+        except Exception as e: print(f"[WARN] DocRes base not available: {e}")
+    return _docres_base
+
+_docres_ft = None
+_docres_ft_variant = None
+def get_docres_ft_model(variant='finetune_v1'):
+    global _docres_ft, _docres_ft_variant
+    if _docres_ft is None or _docres_ft_variant != variant:
+        try: _docres_ft = get_docres_finetune(variant, device=str(device)); _docres_ft_variant = variant
+        except Exception as e: print(f"[WARN] DocRes finetune not available: {e}")
+    return _docres_ft
+
+
+_docres_onnx = None
+def get_docres_onnx_model():
+    global _docres_onnx
+    if _docres_onnx is None:
+        try: _docres_onnx = DocResONNX()
+        except Exception as e:
+            print(f"[WARN] DocRes ONNX load failed: {e}")
+            return None
+    return _docres_onnx
+
+
 # --- FastAPI Setup ---
 spa_dist = BASE_DIR / 'frontend' / 'dist'
+@app.get("/opencv.js")
+async def serve_opencv():
+    return FileResponse(str(spa_dist / "opencv.js"), media_type="application/javascript")
 login_html = BASE_DIR / 'frontend' / 'templates_bak' / 'login.html'
 app.mount("/assets", StaticFiles(directory=str(spa_dist / 'assets')), name="spa-assets")
+# removed
 fonts_dir = BASE_DIR / 'frontend' / 'public' / 'fonts'
 app.mount("/fonts", StaticFiles(directory=str(fonts_dir)), name="local-fonts")
 
@@ -235,6 +273,12 @@ def _validate_training_controls(early_stop_patience: int, min_delta: float, grad
 
 
 def _pil_to_response(img: Image.Image, filename: str = "result.png"):
+    _adj = _ADJUST_CTX.get()
+    if _adj:
+        try:
+            img = apply_adjustments(img, **_adj)
+        except Exception as _e:
+            print(f"[WARN] adjustment failed: {_e}")
     buf = io.BytesIO()
     img.save(buf, format='PNG')
     buf.seek(0)
@@ -273,6 +317,10 @@ async def test_model_page(request: Request):
 async def train_page(request: Request):
     return render_page(request, "train.html")
 
+@app.get("/docres")
+async def docres_page(request: Request):
+    return render_page(request)
+
 
 @app.get("/image-tests")
 async def image_tests_page(request: Request):
@@ -303,6 +351,21 @@ async def dataset_manager_detail_page(request: Request, slug: str):
     return render_page(request)
 
 
+@app.get("/synthetic-shadow")
+async def synthetic_shadow_page(request: Request):
+    return render_page(request)
+
+
+@app.get("/magang")
+async def magang_page(request: Request):
+    return FileResponse(str(spa_dist / 'index.html'))
+
+
+@app.get("/magang-review")
+async def magang_review_page(request: Request):
+    return FileResponse(str(spa_dist / 'index.html'))
+
+
 # =====================================================================
 #  AUTH API
 # =====================================================================
@@ -316,6 +379,28 @@ async def login(username: str = Form(...), password: str = Form(...)):
     return response
 
 
+@app.post("/api/auth/register")
+async def register(username: str = Form(...), password: str = Form(...)):
+    result = register_intern(username, password)
+    if "error" in result:
+        return JSONResponse(result, status_code=400)
+    # Auto-login after register
+    token = create_token(username)
+    response = JSONResponse({"success": True, "token": token, "user": username, "message": "Registrasi berhasil. Sekarang kamu bisa upload dataset!"})
+    response.set_cookie("docai_token", token, httponly=True, samesite="lax", max_age=24 * 60 * 60)
+    return response
+
+
+@app.post("/api/auth/login/intern")
+async def login_intern(username: str = Form(...), password: str = Form(...)):
+    if validate_intern(username, password):
+        token = create_token(username)
+        response = JSONResponse({"success": True, "token": token, "user": username})
+        response.set_cookie("docai_token", token, httponly=True, samesite="lax", max_age=24 * 60 * 60)
+        return response
+    return JSONResponse({"success": False, "message": "Username atau password salah"}, status_code=401)
+
+
 @app.get("/api/auth/logout")
 async def logout():
     response = JSONResponse({'success': True})
@@ -326,6 +411,267 @@ async def logout():
 @app.get("/api/auth/check")
 async def auth_check(request: Request):
     return {'authenticated': is_authenticated(request)}
+
+
+
+# =====================================================================
+#  MAGANG (INTERN) DATASET APIs
+# =====================================================================
+
+@app.get("/api/magang/list")
+async def magang_list(request: Request):
+    """List datasets milik intern sendiri, atau semua (admin)."""
+    from backend.auth import ADMIN_CREDENTIALS
+    token = get_token_from_request(request)
+    username = validate_token_any(token)
+    if not username:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    is_admin = (username == ADMIN_CREDENTIALS["username"])
+    base = BASE_DIR / "datasets" / "magang"
+    base.mkdir(parents=True, exist_ok=True)
+
+    result = []
+    if is_admin:
+        # Admin lihat semua
+        for user_dir in sorted(base.iterdir()):
+            if user_dir.is_dir():
+                info = _scan_magang(user_dir)
+                if info:
+                    result.append(info)
+    else:
+        # Intern lihat milik sendiri
+        user_dir = base / username
+        if user_dir.exists():
+            info = _scan_magang(user_dir)
+            if info:
+                result.append(info)
+        else:
+            user_dir.mkdir(parents=True, exist_ok=True)
+    return {"datasets": result}
+
+
+def _scan_magang(user_dir: Path) -> dict:
+    input_dir = user_dir / "input"
+    target_dir = user_dir / "target"
+    IMG = {'.png', '.jpg', '.jpeg', '.bmp', '.tif', '.tiff', '.webp'}
+    inputs = [f for f in input_dir.iterdir() if f.is_file() and f.suffix.lower() in IMG] if input_dir.exists() else []
+    targets = [f for f in target_dir.iterdir() if f.is_file() and f.suffix.lower() in IMG] if target_dir.exists() else []
+    input_stems = {f.stem for f in inputs}
+    target_stems = {f.stem for f in targets}
+    paired = len(input_stems & target_stems)
+    return {
+        "username": user_dir.name,
+        "path": str(user_dir.relative_to(BASE_DIR)),
+        "input_count": len(inputs),
+        "target_count": len(targets),
+        "paired_count": paired,
+        "updated_at": user_dir.stat().st_mtime,
+    }
+
+
+@app.post("/api/magang/audit")
+async def magang_audit(request: Request):
+    """Audit pair tanpa menyimpan."""
+    token = get_token_from_request(request)
+    username = validate_token_any(token)
+    if not username:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    form = await request.form()
+    shadow_file = form.get("shadow")
+    clean_file = form.get("clean")
+    if not shadow_file or not clean_file:
+        raise HTTPException(status_code=400, detail="Shadow dan clean file required")
+
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmpdir:
+        shadow_path = os.path.join(tmpdir, "shadow.jpg")
+        clean_path = os.path.join(tmpdir, "clean.jpg")
+        with open(shadow_path, "wb") as f:
+            f.write(await shadow_file.read())
+        with open(clean_path, "wb") as f:
+            f.write(await clean_file.read())
+
+        from backend.utils.dataset_audit import audit_pair
+        result = audit_pair(shadow_path, clean_path)
+
+    score = result.get("score", 0)
+    return {
+        "score": score,
+        "grade": result.get("grade", "D"),
+        "reasons": result.get("reasons", []),
+        "passed": score >= 90,
+        "min_score": 90,
+        "dimensions": result.get("dimensions", {}),
+        "luminance": result.get("luminance", {}),
+    }
+
+@app.post("/api/magang/upload")
+async def magang_upload(request: Request, shadow: UploadFile = File(...), clean: UploadFile = File(...)):
+    """Intern upload pair ke foldernya sendiri."""
+    from backend.auth import ADMIN_CREDENTIALS
+    token = get_token_from_request(request)
+    username = validate_token_any(token)
+    if not username or username == ADMIN_CREDENTIALS["username"]:
+        raise HTTPException(status_code=401, detail="Hanya intern yang bisa upload")
+    
+    base = BASE_DIR / "datasets" / "magang" / username
+    input_dir = base / "input"
+    target_dir = base / "target"
+    input_dir.mkdir(parents=True, exist_ok=True)
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    # Validate images
+    shadow_bytes = await shadow.read()
+    clean_bytes = await clean.read()
+    if len(shadow_bytes) == 0 or len(clean_bytes) == 0:
+        raise HTTPException(status_code=400, detail="File tidak boleh kosong")
+
+    IMAGE_EXTS = {'.png', '.jpg', '.jpeg', '.bmp', '.tif', '.tiff', '.webp'}
+    shadow_ext = Path(shadow.filename or "image.png").suffix.lower()
+    clean_ext = Path(clean.filename or "image.png").suffix.lower()
+    if shadow_ext not in IMAGE_EXTS or clean_ext not in IMAGE_EXTS:
+        raise HTTPException(status_code=400, detail="Format file tidak didukung")
+    if len(shadow_bytes) < 50 * 1024 or len(clean_bytes) < 50 * 1024:
+        raise HTTPException(status_code=400, detail="File terlalu kecil (<50KB)")
+
+    # Cek duplikat: bandingkan hash file shadow
+    import hashlib
+    shadow_hash = hashlib.md5(shadow_bytes).hexdigest()
+    clean_hash = hashlib.md5(clean_bytes).hexdigest()
+
+    if shadow_hash == clean_hash:
+        raise HTTPException(status_code=400, detail="File shadow dan clean sama! Upload dua foto yang berbeda.")
+
+    for existing_f in list(input_dir.glob("*.*")):
+        if existing_f.suffix.lower() not in IMAGE_EXTS:
+            continue
+        with open(existing_f, "rb") as ef:
+            existing_bytes = ef.read()
+        if hashlib.md5(existing_bytes).hexdigest() == shadow_hash:
+            raise HTTPException(status_code=400, detail=f"File shadow sudah pernah diupload ({existing_f.name}). Upload gambar baru.")
+        if hashlib.md5(existing_bytes).hexdigest() == clean_hash:
+            raise HTTPException(status_code=400, detail=f"File clean sudah pernah diupload ({existing_f.name}). Upload gambar baru.")
+
+    # Find next index
+    existing = list(input_dir.glob("*.png")) + list(input_dir.glob("*.jpg")) + list(input_dir.glob("*.jpeg"))
+    idx = len(existing) + 1
+    stem = f"pair_{idx:04d}"
+
+    shadow_path = input_dir / f"{stem}{shadow_ext}"
+    clean_path = target_dir / f"{stem}{clean_ext}"
+
+    with open(shadow_path, "wb") as f:
+        f.write(shadow_bytes)
+    with open(clean_path, "wb") as f:
+        f.write(clean_bytes)
+
+    return {
+        "success": True,
+        "pair": stem,
+        "input": str(shadow_path.relative_to(BASE_DIR)),
+        "target": str(clean_path.relative_to(BASE_DIR)),
+    }
+
+
+@app.get("/api/magang/review")
+async def magang_review(request: Request):
+    """Admin review: lihat semua dataset magang + thumbnail."""
+    from backend.auth import ADMIN_CREDENTIALS
+    token = get_token_from_request(request)
+    username = validate_token_any(token)
+    if username != ADMIN_CREDENTIALS["username"]:
+        raise HTTPException(status_code=403, detail="Hanya admin")
+    
+    base = BASE_DIR / "datasets" / "magang"
+    if not base.exists():
+        return {"users": [], "total_pairs": 0}
+    
+    users = []
+    total_pairs = 0
+    for user_dir in sorted(base.iterdir()):
+        if not user_dir.is_dir():
+            continue
+        info = _scan_magang(user_dir)
+        if not info:
+            continue
+        total_pairs += info["paired_count"]
+        
+        # List pairs
+        input_dir = user_dir / "input"
+        target_dir = user_dir / "target"
+        IMG = {'.png', '.jpg', '.jpeg', '.bmp', '.tif', '.tiff', '.webp'}
+        inputs = {}
+        if input_dir.exists():
+            for f in input_dir.iterdir():
+                if f.is_file() and f.suffix.lower() in IMG:
+                    inputs[f.stem] = str(f.relative_to(BASE_DIR / 'datasets' / 'magang'))
+        targets = {}
+        if target_dir.exists():
+            for f in target_dir.iterdir():
+                if f.is_file() and f.suffix.lower() in IMG:
+                    targets[f.stem] = str(f.relative_to(BASE_DIR / 'datasets' / 'magang'))
+        
+        pairs_list = []
+        for stem in sorted(set(list(inputs.keys()) + list(targets.keys()))):
+            pairs_list.append({
+                "name": stem,
+                "input": inputs.get(stem),
+                "target": targets.get(stem),
+                "paired": stem in inputs and stem in targets,
+            })
+        
+        users.append({
+            "username": user_dir.name,
+            "path": str(user_dir.relative_to(BASE_DIR)),
+            "input_count": info["input_count"],
+            "target_count": info["target_count"],
+            "paired_count": info["paired_count"],
+            "pairs": pairs_list,
+        })
+    
+    return {"users": users, "total_pairs": total_pairs}
+
+
+@app.post("/api/magang/move")
+async def magang_move(request: Request):
+    """Admin memindahkan pair dari magang ke custom."""
+    from backend.auth import ADMIN_CREDENTIALS
+    token = get_token_from_request(request)
+    username = validate_token_any(token)
+    if username != ADMIN_CREDENTIALS["username"]:
+        raise HTTPException(status_code=403, detail="Hanya admin")
+    
+    body = await request.json()
+    username = body.get("username", "")
+    pair_name = body.get("pair_name", "")
+    if not username or not pair_name:
+        raise HTTPException(status_code=400, detail="username dan pair_name required")
+    
+    src_input = BASE_DIR / "datasets" / "magang" / username / "input" / f"{pair_name}.png"
+    src_target = BASE_DIR / "datasets" / "magang" / username / "target" / f"{pair_name}.png"
+    if not src_input.exists() or not src_target.exists():
+        raise HTTPException(status_code=404, detail=f"Pair {pair_name} not found")
+    
+    # Copy to custom
+    custom_input = BASE_DIR / "datasets" / "paired" / "custom" / "custom" / "input"
+    custom_target = BASE_DIR / "datasets" / "paired" / "custom" / "custom" / "target"
+    
+    # Find next pair index
+    existing = list(custom_input.glob("pair_*.png"))
+    idx = len(existing) + 1
+    new_stem = f"pair_{idx:04d}"
+    
+    import shutil
+    shutil.copy2(str(src_input), str(custom_input / f"{new_stem}.png"))
+    shutil.copy2(str(src_target), str(custom_target / f"{new_stem}.png"))
+    
+    # Optionally delete from magang
+    src_input.unlink()
+    src_target.unlink()
+    
+    return {"success": True, "new_pair": new_stem, "from": f"magang/{username}", "to": f"custom/custom"}
+
 
 
 # =====================================================================
@@ -372,6 +718,61 @@ async def models_info(request: Request):
         info["docshadow_sd7k"] = {"loaded": False}
     return info
 
+
+# DocRes system monitoring + training history
+
+@app.get("/api/training/docres/system")
+async def docres_system_status(request: Request):
+    import psutil, subprocess
+    result = {"cpu_percent": psutil.cpu_percent(interval=0.1), "cpu_count": psutil.cpu_count()}
+    mem = psutil.virtual_memory()
+    result["ram_used_gb"] = round(mem.used / 1024**3, 1)
+    result["ram_total_gb"] = round(mem.total / 1024**3, 1)
+    result["ram_percent"] = mem.percent
+    try:
+        r = subprocess.run(["nvidia-smi", "--query-gpu=name,memory.used,memory.total,utilization.gpu,temperature.gpu", "--format=csv,noheader,nounits"], capture_output=True, text=True, timeout=5)
+        if r.returncode == 0:
+            parts = r.stdout.strip().split(", ")
+            if len(parts) >= 5:
+                result["gpu"] = {"name": parts[0].strip(), "vram_used": int(parts[1]), "vram_total": int(parts[2]), "utilization": int(parts[3]), "temperature": int(parts[4])}
+    except Exception:
+        pass
+    return result
+
+@app.get("/api/training/docres/history")
+async def docres_training_history(request: Request):
+    import re, json as _json_mod
+    log_dir = DOCRES_STATUS_PATH.parent
+    points = []
+    if log_dir.exists():
+        runs = sorted([d for d in log_dir.iterdir() if d.is_dir() and d.name.startswith("deshadow_v3_")], reverse=True)
+        if runs:
+            log_path = runs[0] / "train.log"
+            if log_path.exists():
+                for line in log_path.read_text().splitlines():
+                    m = re.search(r"iter=(\d+)\s+loss=([\d.]+)\s+lr=([\d.e\-]+)", line)
+                    if m:
+                        points.append({"iter": int(m.group(1)), "loss": float(m.group(2)), "lr": float(m.group(3))})
+    return {"points": points[-500:]}
+
+# DocRes fine-tuning training status
+DOCRES_STATUS_PATH = BASE_DIR.parent / "DocRes" / "finetune_logs" / "docres_status.json"
+
+@app.get("/api/training/docres/status")
+async def docres_training_status(request: Request):
+    import json as _json
+    if DOCRES_STATUS_PATH.exists():
+        try:
+            import math
+            data = _json.loads(DOCRES_STATUS_PATH.read_text())
+            # Fix inf/nan values
+            for k, v in data.items():
+                if isinstance(v, float) and (math.isinf(v) or math.isnan(v)):
+                    data[k] = None
+            return data
+        except Exception:
+            pass
+    return {"running": False, "status": "no data"}
 
 @app.get("/api/system/status")
 async def system_status(request: Request):
@@ -447,8 +848,18 @@ async def system_status(request: Request):
 # =====================================================================
 @app.post("/api/scan")
 async def scan_document(request: Request, file: UploadFile = File(...), mode: str = Form("restore"),
-                         pipeline_mode: str = Form("full"), shadow_strength: float = Form(1.0)):
+                         pipeline_mode: str = Form("full"), shadow_strength: float = Form(1.0),
+                         adj_brightness: float = Form(1.0), adj_contrast: float = Form(1.0),
+                         adj_saturation: float = Form(1.0), adj_sharpness: float = Form(1.0),
+                         adj_gamma: float = Form(1.0), adj_white_balance: bool = Form(False),
+                         adj_clahe: float = Form(0.0), variant: str = Form("finetune_v3")):
     # require_api_auth(request)  # Public for image loading
+    _ADJUST_CTX.set({
+        "brightness": adj_brightness, "contrast": adj_contrast,
+        "saturation": adj_saturation, "sharpness": adj_sharpness,
+        "gamma": adj_gamma, "white_balance": adj_white_balance,
+        "clahe_clip": adj_clahe,
+    })
     image = _read_image(file)
 
     if mode == "restore" and doc_restorer_model is not None:
@@ -518,6 +929,34 @@ async def scan_document(request: Request, file: UploadFile = File(...), mode: st
         elapsed = round((time.time() - start) * 1000, 1)
         return _pil_to_response(Image.fromarray(result_np))
 
+    elif mode == "docres_base":
+        start = time.time()
+        mdl = get_docres_base_model()
+        if mdl is None:
+            raise HTTPException(status_code=500, detail="DocRes base model not loaded")
+        result = mdl.infer(image)
+        elapsed = round((time.time() - start) * 1000, 1)
+        return _pil_to_response(result)
+
+    elif mode == "docres_finetune":
+        variant = variant
+        start = time.time()
+        mdl = get_docres_ft_model(variant)
+        if mdl is None:
+            raise HTTPException(status_code=500, detail=f"DocRes finetune ({variant}) not loaded")
+        result = mdl.infer(image)
+        elapsed = round((time.time() - start) * 1000, 1)
+        return _pil_to_response(result)
+
+    elif mode == "docres_onnx":
+        start = time.time()
+        mdl = get_docres_onnx_model()
+        if mdl is None:
+            raise HTTPException(status_code=500, detail="DocRes ONNX model not loaded")
+        result = mdl.infer(image)
+        elapsed = round((time.time() - start) * 1000, 1)
+        return _pil_to_response(result)
+
     elif mode == "color_binarize":
         start = time.time()
         img_np = np.array(image.convert("RGB"))
@@ -576,7 +1015,7 @@ async def scan_document(request: Request, file: UploadFile = File(...), mode: st
         return _pil_to_response(result)
 
     else:
-        available = ["restore", "shadow_remove", "shadow_so", "shadow_so_aggressive", "shadow_effective_bg", "shadow_iterative", "color_binarize", "enhance", "magic_enhance", "binarize",
+        available = ["restore", "shadow_remove", "shadow_so", "shadow_so_aggressive", "shadow_effective_bg", "shadow_iterative", "docres_base", "docres_finetune", "color_binarize", "enhance", "magic_enhance", "binarize",
                       "deskew", "cleanup", "clahe", "denoise", "sharpen", "docres"]
         raise HTTPException(status_code=400,
                             detail=f"Mode '{mode}' not available. Use one of: {available}")
@@ -1169,6 +1608,11 @@ async def list_datasets(request: Request):
         if path in seen_dataset_paths:
             return
         seen_dataset_paths.add(path)
+        try:
+            ds_path = Path(info.get('abs_path') or (BASE_DIR / path))
+            info['updated_at'] = ds_path.stat().st_mtime
+        except Exception:
+            info['updated_at'] = 0
         all_datasets.append(info)
     for search_dir in search_dirs:
         if not search_dir.exists():
@@ -1268,6 +1712,7 @@ async def list_datasets(request: Request):
                         'source': str(search_dir.relative_to(BASE_DIR)),
                         'note': 'Clean dataset (synthetic degradation)',
                     })
+    all_datasets.sort(key=lambda item: item.get('updated_at', 0), reverse=True)
     return {'datasets': all_datasets}
 
 
@@ -1329,7 +1774,7 @@ def _scan_paired_dataset(d: Path) -> dict:
 
 def _dataset_root(path: str) -> Path:
     root = (BASE_DIR / path).resolve()
-    allowed_roots = [(BASE_DIR / 'data' / 'datasets').resolve(), (BASE_DIR / 'datasets').resolve()]
+    allowed_roots = [(BASE_DIR / 'data' / 'datasets').resolve(), (BASE_DIR / 'datasets').resolve(), (BASE_DIR / 'datasets' / 'magang').resolve()]
     if not any(root == allowed or allowed in root.parents for allowed in allowed_roots):
         raise HTTPException(status_code=400, detail='Dataset path outside allowed roots')
     if not root.is_dir():
@@ -2309,3 +2754,358 @@ async def training_log(request: Request, offset: int = 0):
             _load_training_log(TRAINING_LOG_PATH.read_text(encoding='utf-8').splitlines())
         lines = _training_log[offset:]
     return {'running': running, 'lines': lines, 'total': len(_training_log)}
+
+
+# === Synthetic Shadow Generator ===
+import io, base64, random, math
+from PIL import Image, ImageDraw, ImageFilter
+import numpy as np
+
+def _make_object_shadow_mask(w, h, obj_type, intensity, width_pct, margin_x=0.0, margin_y=0.0):
+    """Generate realistic object shadow mask using PIL polygon drawing.
+    obj_type: hand, phone, finger
+    margin_x: 0=at left/right edge, 1.0=at center
+    margin_y: 0=at bottom edge, 1.0=at center
+    """
+    from PIL import Image, ImageDraw, ImageFilter
+    import math
+
+    rng = np.random.RandomState()
+
+    # Compute position based on margin (0=edge, 1.0=center)
+    # X: margin_x=0 -> edge (random side), margin_x=1.0 -> center
+    # Y: margin_y=0 -> bottom edge, margin_y=1.0 -> center
+    if margin_x < 0.5:
+        # Left edge side
+        cx = w * (0.05 + margin_x * 0.45)
+    else:
+        # Right edge side
+        cx = w * (0.5 + (margin_x - 0.5) * 0.9)
+    cy = h * (0.95 - margin_y * 0.45)  # 0.95=bottom, 0.5=center
+
+    if obj_type == "hand":
+        palm_cx = cx
+        palm_cy = cy
+        palm_rx = w * 0.18
+        palm_ry = h * 0.12
+
+        mask_img = Image.new('L', (w, h), 0)
+        draw = ImageDraw.Draw(mask_img)
+
+        # Draw palm (ellipse)
+        draw.ellipse([palm_cx - palm_rx, palm_cy - palm_ry, palm_cx + palm_rx, palm_cy + palm_ry], fill=240)
+
+        # Draw 4 fingers (index, middle, ring, pinky) - large and spread
+        fingers = [
+            {"dx": -0.14, "dy": -0.25, "fw": 0.05, "fh": 0.25, "angle": -15},
+            {"dx": -0.05, "dy": -0.30, "fw": 0.05, "fh": 0.30, "angle": -3},
+            {"dx": 0.05, "dy": -0.28, "fw": 0.05, "fh": 0.28, "angle": 7},
+            {"dx": 0.12, "dy": -0.20, "fw": 0.045, "fh": 0.20, "angle": 15},
+        ]
+
+        for f in fingers:
+            fx = palm_cx + w * f["dx"] + rng.randint(-10, 10)
+            fy = palm_cy + h * f["dy"] + rng.randint(-5, 5)
+            fw = w * f["fw"]
+            fh = h * f["fh"]
+
+            n_pts = 40
+            points = []
+            for i in range(n_pts):
+                t = i / (n_pts - 1)
+                width_factor = 1.0 - 0.4 * t
+                tip_round = math.sin(t * math.pi)
+                px = fx + fw * width_factor * tip_round
+                py = fy + fh * t
+                points.append((px, py))
+            for i in range(n_pts - 1, -1, -1):
+                t = i / (n_pts - 1)
+                width_factor = 1.0 - 0.4 * t
+                tip_round = math.sin(t * math.pi)
+                px = fx - fw * width_factor * tip_round
+                py = fy + fh * t
+                points.append((px, py))
+
+            if len(points) >= 3:
+                draw.polygon(points, fill=220)
+
+        # Draw thumb (from side)
+        thumb_x = palm_cx - w * 0.20
+        thumb_y = palm_cy + h * 0.02
+        thumb_w = w * 0.04
+        thumb_h = h * 0.18
+
+        n_pts = 40
+        points = []
+        for i in range(n_pts):
+            t = i / (n_pts - 1)
+            width_factor = 1.0 - 0.5 * t
+            tip_round = math.sin(t * math.pi)
+            px = thumb_x + thumb_w * width_factor * tip_round
+            py = thumb_y + thumb_h * t
+            points.append((px, py))
+        for i in range(n_pts - 1, -1, -1):
+            t = i / (n_pts - 1)
+            width_factor = 1.0 - 0.5 * t
+            tip_round = math.sin(t * math.pi)
+            px = thumb_x - thumb_w * width_factor * tip_round
+            py = thumb_y + thumb_h * t
+            points.append((px, py))
+        if len(points) >= 3:
+            draw.polygon(points, fill=210)
+
+        blur_radius = max(int(min(w, h) * 0.003), 2)
+        mask_img = mask_img.filter(ImageFilter.GaussianBlur(radius=blur_radius))
+
+    elif obj_type == "phone":
+        mask_img = Image.new('L', (w, h), 0)
+        draw = ImageDraw.Draw(mask_img)
+
+        phone_cx = cx
+        phone_cy = cy
+        phone_w = w * rng.uniform(0.18, 0.30)
+        phone_h = h * rng.uniform(0.30, 0.45)
+        phone_angle = rng.uniform(-20, 20)
+
+        x1 = int(phone_cx - phone_w / 2)
+        y1 = int(phone_cy - phone_h / 2)
+        x2 = int(phone_cx + phone_w / 2)
+        y2 = int(phone_cy + phone_h / 2)
+        radius = int(min(phone_w, phone_h) * 0.08)
+
+        draw.rounded_rectangle([x1, y1, x2, y2], radius=radius, fill=240)
+
+        notch_w = phone_w * 0.12
+        notch_h = phone_h * 0.025
+        notch_x = int(phone_cx - notch_w / 2)
+        notch_y = int(phone_cy - phone_h / 2)
+        draw.ellipse([notch_x, notch_y, notch_x + notch_w, notch_y + notch_h], fill=200)
+
+        blur_radius = max(int(min(w, h) * 0.003), 2)
+        mask_img = mask_img.filter(ImageFilter.GaussianBlur(radius=blur_radius))
+        mask_img = mask_img.rotate(phone_angle, expand=False, center=(int(phone_cx), int(phone_cy)))
+
+    elif obj_type == "finger":
+        mask_img = Image.new('L', (w, h), 0)
+        draw = ImageDraw.Draw(mask_img)
+
+        finger_cx = cx
+        finger_cy = cy
+        finger_w = w * 0.06
+        finger_h = h * 0.22
+        finger_angle = rng.uniform(-35, 35)
+
+        n_pts = 50
+        points = []
+        for i in range(n_pts):
+            t = i / (n_pts - 1)
+            width_factor = 1.0 - 0.5 * t
+            tip_round = math.sin(t * math.pi)
+            px = finger_cx + finger_w * width_factor * tip_round
+            py = finger_cy - finger_h * t
+            points.append((px, py))
+        for i in range(n_pts - 1, -1, -1):
+            t = i / (n_pts - 1)
+            width_factor = 1.0 - 0.5 * t
+            tip_round = math.sin(t * math.pi)
+            px = finger_cx - finger_w * width_factor * tip_round
+            py = finger_cy - finger_h * t
+            points.append((px, py))
+
+        if len(points) >= 3:
+            draw.polygon(points, fill=240)
+
+        nail_cx = finger_cx
+        nail_cy = finger_cy - finger_h * 0.82
+        nail_w = finger_w * 0.5
+        nail_h = finger_h * 0.06
+        draw.ellipse([nail_cx - nail_w, nail_cy - nail_h, nail_cx + nail_w, nail_cy + nail_h], fill=200)
+
+        blur_radius = max(int(min(w, h) * 0.003), 2)
+        mask_img = mask_img.filter(ImageFilter.GaussianBlur(radius=blur_radius))
+        mask_img = mask_img.rotate(finger_angle, expand=False, center=(int(finger_cx), int(finger_cy)))
+
+    else:
+        return np.zeros((h, w), dtype=np.float32)
+
+    # Convert to numpy array    # Convert to numpy array
+    mask = np.array(mask_img).astype(np.float32) / 255.0
+    mask = mask * intensity
+    mask = np.clip(mask, 0, 1)
+    return mask
+def generate_synthetic_shadow(img: Image.Image, position: str = "bottom", intensity: float = 0.7, width_pct: float = 0.4) -> Image.Image:
+    """Generate synthetic shadow on image.
+    position: left, right, top, bottom, all, bottom_left, bottom_right
+    intensity: 0.0-1.0 (shadow darkness)
+    width_pct: how much of the image the shadow covers (0.0-1.0)
+    """
+    w, h = img.size
+    arr = np.array(img).astype(np.float32)
+    mask = np.zeros((h, w), dtype=np.float32)
+
+    # Create gradient shadow mask based on position
+    if position == "bottom":
+        start = int(h * (1 - width_pct))
+        for y in range(start, h):
+            t = (y - start) / max(h - start, 1)
+            fade = intensity * (t ** 0.6)
+            mask[y, :] = fade
+    elif position == "top":
+        end = int(h * width_pct)
+        for y in range(end):
+            t = 1 - (y / max(end, 1))
+            fade = intensity * (t ** 0.6)
+            mask[y, :] = fade
+    elif position == "left":
+        end = int(w * width_pct)
+        for x in range(end):
+            t = 1 - (x / max(end, 1))
+            fade = intensity * (t ** 0.6)
+            mask[:, x] = fade
+    elif position == "right":
+        start = int(w * (1 - width_pct))
+        for x in range(start, w):
+            t = (x - start) / max(w - start, 1)
+            fade = intensity * (t ** 0.6)
+            mask[:, x] = fade
+    elif position == "all":
+        for y in range(h):
+            for x in range(w):
+                dy = min(y, h - y) / (h / 2)
+                dx = min(x, w - x) / (w / 2)
+                edge_factor = 1 - min(dy, dx)
+                if edge_factor > 0:
+                    mask[y, x] = intensity * (edge_factor ** 0.5)
+    elif position == "bottom_left":
+        for y in range(h):
+            for x in range(w):
+                dist = (x / w + y / h) / 2
+                if dist > 0.5:
+                    mask[y, x] = intensity * ((dist - 0.5) * 2) ** 0.6
+    elif position == "bottom_right":
+        for y in range(h):
+            for x in range(w):
+                dist = ((w - x) / w + y / h) / 2
+                if dist > 0.5:
+                    mask[y, x] = intensity * ((dist - 0.5) * 2) ** 0.6
+
+    # Apply shadow mask with blur for soft edges
+    mask_img = Image.fromarray((mask * 255).astype(np.uint8), mode="L")
+    mask_img = mask_img.filter(ImageFilter.GaussianBlur(radius=15))
+    mask_arr = np.array(mask_img).astype(np.float32) / 255.0
+
+    # Apply shadow: darken the image where mask is dark
+    shadow_color = np.array([0.0, 0.0, 0.0])
+    for c in range(3):
+        arr[:, :, c] = arr[:, :, c] * (1 - mask_arr) + shadow_color[c] * mask_arr * arr[:, :, c] * intensity
+
+    arr = np.clip(arr, 0, 255).astype(np.uint8)
+    return Image.fromarray(arr)
+
+
+def generate_object_shadow(img: Image.Image, obj_type: str = "hand", intensity: float = 0.7, width_pct: float = 0.4, margin_x: float = 0.0, margin_y: float = 0.0) -> Image.Image:
+    """Generate realistic object shadow on image.
+    obj_type: hand, phone, finger
+    intensity: 0.0-1.0 (shadow darkness)
+    width_pct: how much of the image the shadow covers (0.0-1.0)
+    """
+    w, h = img.size
+    arr = np.array(img).astype(np.float32)
+    mask = _make_object_shadow_mask(w, h, obj_type, intensity, width_pct, margin_x, margin_y)
+
+    # Apply shadow mask with blur for soft edges
+    mask_img = Image.fromarray((mask * 255).astype(np.uint8), mode="L")
+    mask_img = mask_img.filter(ImageFilter.GaussianBlur(radius=max(w, h) * 0.005))
+    mask_arr = np.array(mask_img).astype(np.float32) / 255.0
+
+    # Apply shadow: darken the image where mask is dark
+    shadow_color = np.array([0.0, 0.0, 0.0])
+    for c in range(3):
+        arr[:, :, c] = arr[:, :, c] * (1 - mask_arr) + shadow_color[c] * mask_arr * arr[:, :, c] * intensity
+
+    arr = np.clip(arr, 0, 255).astype(np.uint8)
+    return Image.fromarray(arr)
+
+@app.post("/api/synthetic-shadow/generate")
+async def generate_shadow(
+    file: UploadFile = File(...),
+    position: str = Form("bottom"),
+    intensity: float = Form(0.7),
+    width_pct: float = Form(0.4),
+    obj_type: str = Form("none"),
+    margin_x: float = Form(0.0),
+    margin_y: float = Form(0.0),
+):
+    """Generate synthetic shadow on uploaded image.
+    obj_type: none (gradient), hand, phone, finger
+    margin_x: horizontal offset from edge (0.0-1.0)
+    margin_y: vertical offset from edge (0.0-1.0)
+    """
+    try:
+        data = await file.read()
+        img = Image.open(io.BytesIO(data)).convert("RGB")
+        # Resize if too large
+        max_dim = 1024
+        w, h = img.size
+        if max(w, h) > max_dim:
+            scale = max_dim / max(w, h)
+            img = img.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
+        if obj_type in ("hand", "phone", "finger"):
+            result = generate_object_shadow(img, obj_type, intensity, width_pct, margin_x, margin_y)
+        else:
+            result = generate_synthetic_shadow(img, position, intensity, width_pct)
+        # Return as JPEG base64 (much smaller than PNG)
+        buf = io.BytesIO()
+        result.save(buf, format="JPEG", quality=85)
+        b64 = base64.b64encode(buf.getvalue()).decode()
+        return {"success": True, "image": f"data:image/jpeg;base64,{b64}", "position": position, "intensity": intensity, "obj_type": obj_type}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/synthetic-shadow/save")
+async def save_shadow_pairs(
+    files: List[UploadFile] = File(...),
+    position: str = Form("bottom"),
+    intensity: float = Form(0.7),
+    width_pct: float = Form(0.4),
+    obj_type: str = Form("none"),
+    margin_x: float = Form(0.0),
+    margin_y: float = Form(0.0),
+    output_dir: str = Form("datasets/paired/custom"),
+):
+    """Save shadow pairs to dataset directory."""
+    try:
+        out_dir = BASE_DIR / output_dir
+        input_dir = out_dir / "input"
+        target_dir = out_dir / "target"
+        input_dir.mkdir(parents=True, exist_ok=True)
+        target_dir.mkdir(parents=True, exist_ok=True)
+
+        # Find next index
+        existing = list(input_dir.glob("*.png")) + list(input_dir.glob("*.jpg"))
+        idx = len(existing) + 1
+
+        saved = []
+        for f in files:
+            data = await f.read()
+            img = Image.open(io.BytesIO(data)).convert("RGB")
+            # Resize if too large
+            max_dim = 1024
+            w, h = img.size
+            if max(w, h) > max_dim:
+                scale = max_dim / max(w, h)
+                img = img.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
+            # Save target (clean)
+            target_path = target_dir / f"pair_{idx:04d}.png"
+            img.save(str(target_path))
+            # Generate and save shadow
+            shadow = generate_synthetic_shadow(img, position, intensity, width_pct)
+            input_path = input_dir / f"pair_{idx:04d}.png"
+            shadow.save(str(input_path))
+            saved.append(f"pair_{idx:04d}.png")
+            idx += 1
+
+        return {"success": True, "saved": len(saved), "pairs": saved}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+

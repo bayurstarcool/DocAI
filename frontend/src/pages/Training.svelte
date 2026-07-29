@@ -15,6 +15,7 @@
   let training = false
   let systemStatus = null
   let evaluation = { exists: false, summary: null, preview_url: null, metrics_url: null }
+
   let runs = []
   let selectedCheckpoint = 'checkpoints/document_restorer/best.pth'
   let resumeCheckpoint = 'checkpoints/document_restorer/best.pth'
@@ -63,6 +64,7 @@
   }
 
   onMount(async () => {
+
     refreshIcons()
     await loadDatasets()
     await refreshStatus()

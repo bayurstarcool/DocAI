@@ -1,6 +1,6 @@
 import { writable } from 'svelte/store'
 
-const VALID_ROUTES = ['/', '/test', '/train', '/image-tests', '/datasets', '/dataset-manager']
+const VALID_ROUTES = ["/", "/test", "/train", "/docres", "/image-tests", "/datasets", "/dataset-manager", "/synthetic-shadow", "/magang", "/magang-review"]
 
 export const currentRoute = writable('/')
 

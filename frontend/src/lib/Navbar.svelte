@@ -4,14 +4,30 @@
   import { navigate, currentRoute } from './router.svelte.js'
 
   let mobileOpen = false
+  let isAdmin = false
+
+  import { onMount } from 'svelte'
+  onMount(async () => {
+    const token = localStorage.getItem('docai_token')
+    if (token) {
+      try {
+        const payload = JSON.parse(atob(token))
+        isAdmin = payload.user === 'admin'
+      } catch(e) {}
+    }
+  })
 
   const navItems = [
-    { href: '/', icon: 'layout-dashboard', label: 'Dashboard' },
-    { href: '/test', icon: 'flask-conical', label: 'Test Model' },
-    { href: '/train', icon: 'brain', label: 'Training' },
-    { href: '/image-tests', icon: 'images', label: 'Image Tests' },
-    { href: '/datasets', icon: 'database', label: 'Datasets' },
-    { href: '/dataset-manager', icon: 'settings-2', label: 'Dataset Manager' },
+    { href: '/', icon: 'layout-dashboard', label: 'Dashboard', admin: true },
+    { href: '/test', icon: 'flask-conical', label: 'Test Model', admin: true },
+    { href: '/train', icon: 'brain', label: 'DocAI Training', admin: true },
+    { href: '/docres', icon: 'cpu', label: 'DocRes', admin: true },
+    { href: '/image-tests', icon: 'images', label: 'Image Tests', admin: true },
+    { href: '/datasets', icon: 'database', label: 'Datasets', admin: true },
+    { href: '/dataset-manager', icon: 'settings-2', label: 'Dataset Manager', admin: true },
+    { href: '/synthetic-shadow', icon: 'sun-dim', label: 'Shadow Gen', admin: true },
+    { href: '/magang', icon: 'graduation-cap', label: 'Magang' },
+    { href: '/magang-review', icon: 'clipboard-check', label: 'Review', admin: true },
   ]
 
   function isActive(href) {
@@ -34,14 +50,17 @@
 
     <div class="nav-links">
       {#each navItems as item}
-        <a
-          href={item.href}
-          onclick={(e) => { e.preventDefault(); go(item.href) }}
-          class:active={isActive(item.href)}
-        >
-          <i data-lucide={item.icon}></i>
-          {item.label}
-        </a>
+        {#if item.admin && !isAdmin}
+        {:else}
+          <a
+            href={item.href}
+            onclick={(e) => { e.preventDefault(); go(item.href) }}
+            class:active={isActive(item.href)}
+          >
+            <i data-lucide={item.icon}></i>
+            {item.label}
+          </a>
+        {/if}
       {/each}
     </div>
 
@@ -62,14 +81,17 @@
   {#if mobileOpen}
     <div class="nav-mobile open">
       {#each navItems as item}
-        <a
-          href={item.href}
-          onclick={(e) => { e.preventDefault(); go(item.href) }}
-          class:active={isActive(item.href)}
-        >
-          <i data-lucide={item.icon}></i>
-          {item.label}
-        </a>
+        {#if item.admin && !isAdmin}
+        {:else}
+          <a
+            href={item.href}
+            onclick={(e) => { e.preventDefault(); go(item.href) }}
+            class:active={isActive(item.href)}
+          >
+            <i data-lucide={item.icon}></i>
+            {item.label}
+          </a>
+        {/if}
       {/each}
       <div class="divider"></div>
       <a href="/login" onclick={(e) => { e.preventDefault(); auth.logout() }}>

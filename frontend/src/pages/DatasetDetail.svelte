@@ -19,13 +19,17 @@
   let validating = false
   let validationResult = null
   let previewPair = null
+  let pairPage = 1
+  let pairPageSize = 24
 
   $: {
     const parts = ($currentRoute || "").split("/")
-    slug = parts[2] || ""
+    const newSlug = parts[2] || ""
+    if (newSlug && newSlug !== slug) {
+      slug = newSlug
+      loadDataset()
+    }
   }
-
-  $: if (slug) loadDataset()
 
   onMount(() => { if (slug) loadDataset() })
 
@@ -47,6 +51,11 @@
 
 function openPreview(pair) { previewPair = pair }
   function closePreview() { previewPair = null }
+
+  $: sortedPairs = [...(dataset?.pairs || [])].sort((a, b) => (b.updated_at || 0) - (a.updated_at || 0))
+  $: pairTotalPages = Math.max(1, Math.ceil(sortedPairs.length / pairPageSize))
+  $: if (pairPage > pairTotalPages) pairPage = pairTotalPages
+  $: pagedPairs = sortedPairs.slice((pairPage - 1) * pairPageSize, pairPage * pairPageSize)
 
   async function loadDataset() {
     loading = true
@@ -142,6 +151,11 @@ function openPreview(pair) { previewPair = pair }
       error = e.message
     }
   }
+
+  $: sortedPairs = [...(dataset?.pairs || [])].sort((a, b) => (b.updated_at || 0) - (a.updated_at || 0))
+  $: pairTotalPages = Math.max(1, Math.ceil(sortedPairs.length / pairPageSize))
+  $: if (pairPage > pairTotalPages) pairPage = pairTotalPages
+  $: pagedPairs = sortedPairs.slice((pairPage - 1) * pairPageSize, pairPage * pairPageSize)
 
   function gradeColor(g) {
     return g === "A" ? "#22c55e" : g === "B" ? "#eab308" : g === "C" ? "#f97316" : "#ef4444"
@@ -268,6 +282,11 @@ function openPreview(pair) { previewPair = pair }
             </details>
           {/if}
         </div>
+        <div class="pagination">
+          <button disabled={pairPage <= 1} onclick={() => pairPage--}>Sebelumnya</button>
+          <span>Halaman {pairPage} / {pairTotalPages} · {sortedPairs.length} pair</span>
+          <button disabled={pairPage >= pairTotalPages} onclick={() => pairPage++}>Berikutnya</button>
+        </div>
       {/if}
 
       {#if auditResult}
@@ -316,11 +335,12 @@ function openPreview(pair) { previewPair = pair }
     <!-- Pairs List -->
     <div class="section">
       <h2>Daftar Pair ({dataset.pairs?.length || 0})</h2>
+      <p class="section-hint">Urut: terbaru dulu</p>
       {#if !dataset.pairs || dataset.pairs.length === 0}
         <p class="empty-text">Belum ada pair. Upload di atas untuk menambah.</p>
       {:else}
         <div class="pairs-grid">
-          {#each dataset.pairs as pair}
+          {#each pagedPairs as pair}
             <div class="pair-card" onclick={() => openPreview(pair)}>
               <button class="btn-icon danger delete-btn" onclick={(e) => { e.stopPropagation(); deletePair(pair.name + '.png') }} title="Hapus">
                 <i data-lucide="trash-2"></i>
@@ -342,6 +362,11 @@ function openPreview(pair) { previewPair = pair }
               <span class="pair-name">{pair.name}</span>
             </div>
           {/each}
+        </div>
+        <div class="pagination">
+          <button disabled={pairPage <= 1} onclick={() => pairPage--}>Sebelumnya</button>
+          <span>Halaman {pairPage} / {pairTotalPages} · {sortedPairs.length} pair</span>
+          <button disabled={pairPage >= pairTotalPages} onclick={() => pairPage++}>Berikutnya</button>
         </div>
       {/if}
     </div>
@@ -422,6 +447,10 @@ function openPreview(pair) { previewPair = pair }
   .empty-text { color: var(--text2); font-size: 0.85rem; }
 
   .pairs-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 0.75rem; margin-top: 0.75rem; }
+  .section-hint { color: var(--text3); font-size: 0.8rem; margin-top: -0.25rem; }
+  .pagination { display:flex; justify-content:center; align-items:center; gap:.75rem; margin-top:1.25rem; color:var(--text2); font-size:.8rem; }
+  .pagination button { padding:.4rem .75rem; border:1px solid var(--border); background:var(--bg2); color:var(--text); border-radius:6px; cursor:pointer; }
+  .pagination button:disabled { opacity:.4; cursor:not-allowed; }
   .pair-card { background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); padding: 0.75rem; cursor: pointer; transition: border-color 0.15s; position: relative; }
   .pair-card:hover { border-color: var(--accent); }
   .pair-thumbs { display: flex; gap: 0.5rem; margin-bottom: 0.5rem; }

@@ -2,20 +2,29 @@
 DocRes Restormer integration wrapper.
 Loads pretrained DocRes model for shadow removal on documents.
 Uses 6-channel input: image + deshadow prompt.
+Supports multiple checkpoints: base (pretrained) and finetuned variants.
 """
 import sys
 import os
 import time
 import importlib.util
+from collections import OrderedDict
 from pathlib import Path
 
 import torch
 import numpy as np
 import cv2
 from PIL import Image
+import onnxruntime as ort
 
 
 DOCRES_DIR = Path('/home/wahyu/DocRes')
+
+FINETUNE_CHECKPOINTS = {
+    'finetune_v1': DOCRES_DIR / 'finetune_logs' / 'best.pth',
+    'finetune_v2': DOCRES_DIR / 'finetune_logs' / 'deshadow_v2_20260726_065847' / 'best.pth',
+    'finetune_v3': DOCRES_DIR / 'finetune_logs' / 'deshadow_v3_20260728_021703' / 'iter_45000.pth',
+}
 
 
 def _load_module(name, path):
@@ -26,9 +35,19 @@ def _load_module(name, path):
 
 
 _docres_utils = _load_module('docres_utils', DOCRES_DIR / 'utils.py')
-convert_state_dict = _docres_utils.convert_state_dict
 _restormer_mod = _load_module('restormer_mod', DOCRES_DIR / 'models' / 'restormer_arch.py')
 Restormer = _restormer_mod.Restormer
+
+
+def smart_load_state_dict(model, checkpoint_path):
+    """Load checkpoint with auto-detection of module. prefix."""
+    ckpt = torch.load(str(checkpoint_path), map_location='cpu', weights_only=False)
+    state = ckpt.get('model_state', ckpt)
+    keys = list(state.keys())
+    if keys and all(k.startswith('module.') for k in keys):
+        state = OrderedDict((k[7:], v) for k, v in state.items())
+    model.load_state_dict(state)
+    return model
 
 
 def deshadow_prompt(img):
@@ -51,26 +70,86 @@ def build_model():
     )
 
 
-def load_pretrained(checkpoint_path='checkpoints/docres.pkl'):
+def load_pretrained(checkpoint_path=None):
     if checkpoint_path is None:
         checkpoint_path = DOCRES_DIR / 'checkpoints' / 'docres.pkl'
     model = build_model()
-    ckpt = torch.load(str(checkpoint_path), map_location='cpu', weights_only=False)
-    state = ckpt['model_state']
-    state = convert_state_dict(state)
-    model.load_state_dict(state)
+    smart_load_state_dict(model, checkpoint_path)
     model.eval()
     return model
 
 
+
+
+
+class DocResONNX:
+    """ONNX-based DocRes inference (no PyTorch needed)."""
+    
+    def __init__(self, onnx_path=None, im_size=1280):
+        if onnx_path is None:
+            onnx_path = DOCRES_DIR / "checkpoints" / "docres_base.onnx"
+        self.onnx_path = str(onnx_path)
+        self.im_size = im_size
+        self.session = None
+        print(f"[OK] DocRes ONNX ready ({onnx_path})")
+    
+    def _ensure_loaded(self):
+        if self.session is None:
+            self.session = ort.InferenceSession(self.onnx_path)
+    
+    @staticmethod
+    def _deshadow_prompt(img):
+        h, w = img.shape[:2]
+        work = cv2.resize(img, (1024, 1024))
+        planes = cv2.split(work)
+        bg = []
+        for plane in planes:
+            dilated = cv2.dilate(plane, np.ones((7, 7), np.uint8))
+            bg.append(cv2.medianBlur(dilated, 21))
+        bg = cv2.merge(bg)
+        return cv2.resize(bg, (w, h))
+    
+    def infer(self, img, im_size=None):
+        self._ensure_loaded()
+        
+        if isinstance(img, Image.Image):
+            img_np = cv2.cvtColor(np.array(img.convert("RGB")), cv2.COLOR_RGB2BGR)
+        elif isinstance(img, np.ndarray):
+            img_np = img
+            if img_np.dtype != np.uint8:
+                img_np = (img_np * 255).astype(np.uint8)
+        else:
+            raise ValueError(f"Unsupported type: {type(img)}")
+        
+        res = im_size or self.im_size
+        orig_h, orig_w = img_np.shape[:2]
+        
+        # Resize + prompt
+        img_r = cv2.resize(img_np, (res, res))
+        prompt = self._deshadow_prompt(img_r)
+        
+        # Normalize + concatenate
+        img_n = img_r.astype(np.float32) / 255.0
+        prompt_n = prompt.astype(np.float32) / 255.0
+        in_6ch = np.concatenate([img_n, prompt_n], axis=-1)
+        in_6ch = in_6ch.transpose(2, 0, 1)[np.newaxis].astype(np.float32)
+        
+        # Inference
+        pred = self.session.run(None, {"input": in_6ch})[0]
+        pred_np = (pred.squeeze(0).transpose(1, 2, 0) * 255).clip(0, 255).astype(np.uint8)
+        pred_full = cv2.resize(pred_np, (orig_w, orig_h), interpolation=cv2.INTER_CUBIC)
+        
+        return Image.fromarray(cv2.cvtColor(pred_full, cv2.COLOR_BGR2RGB))
+
+
 class DocResModel:
-    def __init__(self, checkpoint_path=None, device='cuda', im_size=1280):
+    def __init__(self, checkpoint_path=None, device='cuda', im_size=1280, label='pretrained'):
         self.device = torch.device(device)
         self.im_size = im_size
         self.model = load_pretrained(checkpoint_path)
         self.model = self.model.to(self.device)
-        self.checkpoint_name = 'pretrained'
-        print(f"[OK] DocRes model loaded (pretrained), im_size={im_size}")
+        self.checkpoint_name = label
+        print(f"[OK] DocRes loaded ({label}), im_size={im_size}, device={device}")
 
     @torch.inference_mode()
     def infer(self, img, im_size=None):
@@ -107,18 +186,42 @@ class DocResModel:
     def get_model_info(self):
         params = sum(p.numel() for p in self.model.parameters())
         return {
-            'name': 'DocRes Restormer',
+            'name': f'DocRes Restormer ({self.checkpoint_name})',
             'checkpoint': self.checkpoint_name,
             'im_size': self.im_size,
             'total_params': params,
         }
 
 
-_docres_instance = None
+_instances = {}
+
+
+def _get_or_create(key, checkpoint_path, device, label):
+    if key not in _instances:
+        try:
+            _instances[key] = DocResModel(checkpoint_path, device=device, label=label)
+        except Exception as e:
+            print(f"[WARN] Failed to load DocRes ({label}): {e}")
+            return None
+    return _instances[key]
 
 
 def get_docres(device='cuda', im_size=1280):
-    global _docres_instance
-    if _docres_instance is None:
-        _docres_instance = DocResModel(device=device, im_size=im_size)
-    return _docres_instance
+    return _get_or_create(
+        'base', DOCRES_DIR / 'checkpoints' / 'docres.pkl', device, 'base'
+    )
+
+
+def get_docres_base(device='cuda', im_size=1280):
+    return get_docres(device, im_size)
+
+
+def get_docres_finetune(variant='finetune_v1', device='cuda', im_size=1280):
+    cp = FINETUNE_CHECKPOINTS.get(variant)
+    if cp is None:
+        print(f"[WARN] Unknown finetune variant: {variant}")
+        return None
+    if not cp.exists():
+        print(f"[WARN] Finetune checkpoint not found: {cp}")
+        return None
+    return _get_or_create(f'finetune_{variant}', cp, device, f'finetune_{variant}')
