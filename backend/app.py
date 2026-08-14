@@ -2120,87 +2120,77 @@ async def scan_document(request: Request, file: UploadFile = File(...), mode: st
 
 
 
+def _compare_mixed_chain(image, selected_mode):
+    """Run canonical Mixed/V5/LIFT chain used by /api/scan."""
+    global _appearance_mixed
+    import importlib.util
+    if _appearance_mixed is None:
+        spec = importlib.util.spec_from_file_location("appearance_test_compare", "/home/wahyu/DocRes/test_appearance.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _appearance_mixed = mod.load_model(
+            "/home/wahyu/DocRes/finetune_logs/appearance_mixed_custom_v2_pilot_20260810/run1/best.pth"
+        )
+        _appearance_mixed._appearance_infer = mod.inference_appearance
+    with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tf:
+        image.save(tf.name)
+        temp_path = tf.name
+    try:
+        mixed_bgr = _appearance_mixed._appearance_infer(_appearance_mixed, temp_path, device=str(device))
+    finally:
+        os.unlink(temp_path)
+    mixed_rgb = cv2.cvtColor(mixed_bgr, cv2.COLOR_BGR2RGB)
+    if selected_mode == "docres_appearance_mixed":
+        return Image.fromarray(mixed_rgb), "Mixed best iter1500"
+    v5 = get_docres_ft_model("finetune_v5")
+    if v5 is None:
+        raise RuntimeError("V5 model not loaded")
+    v5_rgb = np.array(v5.infer(Image.fromarray(mixed_rgb)))
+    arr = np.clip(0.75 * v5_rgb.astype(np.float32) + 0.25 * mixed_rgb.astype(np.float32), 0, 255).astype(np.uint8)
+    if selected_mode == "docres_appearance_mixed_v5":
+        return Image.fromarray(arr), "Mixed best iter1500 + V5 Blend75"
+    lab = cv2.cvtColor(arr, cv2.COLOR_RGB2LAB).astype(np.float32)
+    luma, aa, bb = cv2.split(lab)
+    gray = cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY).astype(np.float32)
+    bg = cv2.GaussianBlur(gray, (0, 0), 45)
+    mask = cv2.GaussianBlur(np.clip((bg - gray - 3.0) / 55.0, 0.0, 1.0), (0, 0), 35)
+    edge = np.clip(np.abs(cv2.Laplacian(gray, cv2.CV_32F)) / 45.0, 0.0, 1.0)
+    luma = np.clip(luma + np.minimum(luma * 0.12 * mask * (1.0 - 0.5 * edge), 22.0), 0.0, 255.0)
+    result = cv2.cvtColor(cv2.merge([luma, aa, bb]).astype(np.uint8), cv2.COLOR_LAB2RGB)
+    return Image.fromarray(result), "Mixed best iter1500 + V5 Blend75 + inline LIFT12"
+
+
 @app.post("/api/docres/compare")
-async def docres_compare(request: Request, file: UploadFile = File(...), task: str = Form("deshadowing")):
-    """Compare base vs fine-tuned DocRes on same input."""
+async def docres_compare(request: Request, file: UploadFile = File(...), task: str = Form("deshadowing"),
+                         selected_mode: str = Form("docres_appearance_mixed")):
+    """Compare Base against explicitly selected DocAI model/pipeline on same input."""
+    allowed = {"docres_base", "docres_appearance_mixed", "docres_appearance_mixed_v5", "docres_appearance_mixed_v5_lift12"}
+    if selected_mode not in allowed:
+        raise HTTPException(status_code=400, detail=f"Unsupported compare mode: {selected_mode}")
     unload_idle_models()
     image = _read_image(file)
     start_total = time.time()
-
-    # Base model
     base_mdl = get_docres_base_model()
-    base_result = None
-    base_ms = 0
-    if base_mdl:
-        t0 = time.time()
-        base_result = base_mdl.infer_task(image, task)
-        base_ms = round((time.time() - t0) * 1000)
-
-    # Fine-tuned model (same as task model)
-    ft_mdl = get_docres_task_model()
-    ft_result = None
-    ft_ms = 0
-    if ft_mdl:
-        t0 = time.time()
-        ft_result = ft_mdl.infer_task(image, task)
-        ft_ms = round((time.time() - t0) * 1000)
-
+    if base_mdl is None:
+        raise HTTPException(status_code=503, detail="Base DocRes model not loaded")
+    t0 = time.time()
+    base_result = base_mdl.infer_task(image, task)
+    base_ms = round((time.time() - t0) * 1000)
+    t0 = time.time()
+    if selected_mode == "docres_base":
+        selected_result, selected_label = base_result, "Base production"
+    elif selected_mode.startswith("docres_appearance_mixed"):
+        selected_result, selected_label = _compare_mixed_chain(image, selected_mode)
+    else:
+        selected_result, selected_label = get_docres_task_model().infer_task(image, task), "Task model"
+    selected_ms = round((time.time() - t0) * 1000)
     total_ms = round((time.time() - start_total) * 1000)
-
-    # Post-processing: gentle CLAHE + gamma
-    def apply_postprocess(img, clahe_clip=1.5, clahe_grid=16, gamma=1.05):
-        if img is None: return img
-        import cv2
-        arr = cv2.cvtColor(np.array(img.convert("RGB")), cv2.COLOR_RGB2LAB)
-        l_ch = arr[:,:,0]
-        clahe = cv2.createCLAHE(clipLimit=clahe_clip, tileGridSize=(clahe_grid, clahe_grid))
-        arr[:,:,0] = clahe.apply(l_ch)
-        result = cv2.cvtColor(arr, cv2.COLOR_LAB2RGB)
-        if abs(gamma - 1.0) > 0.001:
-            lut = np.array([((i / 255.0) ** (1.0/gamma)) * 255 for i in range(256)]).astype("uint8")
-            result = cv2.LUT(result, lut)
-        return Image.fromarray(result)
-
-    def detect_heavy_shadow(img, threshold=0.3):
-        if img is None: return None, None
-        import cv2
-        arr = np.array(img.convert("RGB"))
-        gray = cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY)
-        _, mask = cv2.threshold(gray, int(threshold*255), 255, cv2.THRESH_BINARY_INV)
-        mask = cv2.GaussianBlur(mask, (21,21), 0)
-        return img, Image.fromarray(mask)
-
-    def brighten_shadows(img, mask, strength=1.5):
-        if img is None or mask is None: return img
-        import cv2
-        arr = np.array(img.convert("RGB")).astype(float)
-        m = np.array(mask.convert("L")).astype(float) / 255.0
-        m = m[:,:,np.newaxis]
-        brightened = np.clip(arr + m * strength * 80, 0, 255).astype(np.uint8)
-        return Image.fromarray(brightened)
-
-    ft_processed = ft_result
-    if ft_result:
-        _, shadow_mask = detect_heavy_shadow(ft_result, threshold=0.25)
-        ft_processed = brighten_shadows(ft_result, shadow_mask, strength=1.3)
-
-    return {
-        "success": True,
-        "task": task,
-        "total_ms": total_ms,
-        "base": {
-            "image": f"data:image/png;base64,{_pil_to_b64(base_result)}" if base_result else None,
-            "ms": base_ms,
-        },
-        "finetuned": {
-            "image": f"data:image/png;base64,{_pil_to_b64(ft_result)}" if ft_result else None,
-            "ms": ft_ms,
-            "checkpoint": str(getattr(ft_mdl, "checkpoint_name", "unknown")),
-        },
-        "finetuned_clahe": {
-            "image": f"data:image/png;base64,{_pil_to_b64(ft_processed)}" if ft_processed else None,
-        },
-    }
+    selected = {"image": f"data:image/png;base64,{_pil_to_b64(selected_result)}", "ms": selected_ms,
+                "label": selected_label, "mode": selected_mode}
+    return {"success": True, "task": task, "selected_mode": selected_mode, "total_ms": total_ms,
+            "base": {"image": f"data:image/png;base64,{_pil_to_b64(base_result)}", "ms": base_ms,
+                     "label": "Base production", "mode": "docres_base"},
+            "selected": selected, "finetuned": selected}
 
 @app.post("/api/scan/json")
 async def scan_document_json(request: Request, file: UploadFile = File(...), mode: str = Form("restore"),

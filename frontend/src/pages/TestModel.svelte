@@ -508,7 +508,7 @@
   let compareResult = null
   let compareView = 'finetuned'
   let comparing = false
-  const isDocresMode = (m) => ['docres_base','docres_finetune','docres_appearance','docres_appearance_mixed','docres_appearance_mixed_v5','docres_deblurring'].includes(m)
+  const isDocresMode = (m) => ['docres_base','docres_finetune','docres_appearance','docres_appearance_mixed','docres_appearance_mixed_v5','docres_appearance_mixed_v5_lift12','docres_deblurring'].includes(m)
 
   async function runCompare() {
     if (!selectedFile) return
@@ -517,6 +517,7 @@
     const fd = new FormData()
     fd.append('file', croppedFile || selectedFile)
     fd.append('task', compareMode)
+    fd.append('selected_mode', selectedMode)
     const start = performance.now()
     try {
       const token = localStorage.getItem('docai_token')
@@ -705,7 +706,7 @@
           </select>
           <button class="btn btn-secondary" onclick={runCompare} disabled={!selectedFile || comparing}>
             {#if comparing}<div class="spinner" style="width:14px;height:14px;border-width:2px"></div>{:else}<i data-lucide="columns"></i>{/if}
-            Compare Base vs Fine-tuned
+            Compare Base vs Selected Model
           </button>
         </div>
       {/if}
@@ -717,7 +718,7 @@
           </div>
           <div style="display:flex;gap:0.5rem;margin-bottom:0.75rem">
             <button class="btn" class:btn-primary={compareView==='base'} class:btn-secondary={compareView!=='base'} onclick={()=>compareView='base'} style="font-size:0.8rem;padding:0.35rem 0.8rem">Base ({compareResult.base?.ms || 0}ms)</button>
-            <button class="btn" class:btn-primary={compareView==='finetuned'} class:btn-secondary={compareView!=='finetuned'} onclick={()=>compareView='finetuned'} style="font-size:0.8rem;padding:0.35rem 0.8rem">Fine-tuned ({compareResult.finetuned?.ms || 0}ms)</button>
+            <button class="btn" class:btn-primary={compareView==='finetuned'} class:btn-secondary={compareView!=='finetuned'} onclick={()=>compareView='finetuned'} style="font-size:0.8rem;padding:0.35rem 0.8rem">{compareResult.selected?.label || 'Selected'} ({compareResult.selected?.ms || 0}ms)</button>
             <button class="btn" class:btn-primary={compareView==='both'} class:btn-secondary={compareView!=='both'} onclick={()=>compareView='both'} style="font-size:0.8rem;padding:0.35rem 0.8rem">Side-by-side</button>
           </div>
           {#if compareView === 'both'}
@@ -727,7 +728,7 @@
                 {#if compareResult.base?.image}<img src={compareResult.base.image} alt="base" style:filter={previewFilter} />{/if}
               </div>
               <div class="img-box">
-                <div class="img-label">Fine-tuned</div>
+                <div class="img-label">{compareResult.selected?.label || 'Selected'}</div>
                 {#if compareResult.finetuned?.image}<img src={compareResult.finetuned.image} alt="finetuned" style:filter={previewFilter} />{/if}
               </div>
             </div>
