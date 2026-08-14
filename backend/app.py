@@ -55,6 +55,7 @@ _ADJUST_CTX = contextvars.ContextVar("adjust_ctx", default=None)
 
 # --- Configuration ---
 BASE_DIR = Path(__file__).parent.parent
+DOCRES_DIR = Path('/home/wahyu/DocRes')
 CHECKPOINT_DIR = BASE_DIR / 'checkpoints'
 EVALUATION_DIR = BASE_DIR / 'evaluation'
 MODEL_CHECKPOINT_PATH = CHECKPOINT_DIR / 'document_restorer' / 'best.pth'
@@ -203,7 +204,11 @@ _docres_onnx = None
 def get_docres_onnx_model():
     global _docres_onnx
     if _docres_onnx is None:
-        try: _docres_onnx = DocResONNX()
+        try:
+            _docres_onnx = DocResONNX(
+                onnx_path=DOCRES_DIR / "onnx_exports" / "docres_base_appearance.onnx",
+                im_size=1280,
+            )
         except Exception as e:
             print(f"[WARN] DocRes ONNX load failed: {e}")
             return None
@@ -1888,7 +1893,7 @@ async def scan_document(request: Request, file: UploadFile = File(...), mode: st
         mdl = get_docres_onnx_model()
         if mdl is None:
             raise HTTPException(status_code=500, detail="DocRes ONNX model not loaded")
-        result = mdl.infer(image)
+        result = mdl.infer(image, task="appearance")
         elapsed = round((time.time() - start) * 1000, 1)
         return _pil_to_response(result)
 

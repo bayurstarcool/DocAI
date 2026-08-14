@@ -245,7 +245,7 @@ class DocResONNX:
         
         # Resize + prompt
         img_r = cv2.resize(img_np, (res, res))
-        prompt = self._deshadow_prompt(img_r)
+        prompt = appearance_prompt(img_r) if task == "appearance" else self._deshadow_prompt(img_r)
         
         # Normalize + concatenate
         img_n = img_r.astype(np.float32) / 255.0
