@@ -1917,6 +1917,35 @@ async def scan_document(request: Request, file: UploadFile = File(...), mode: st
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Mixed V5 load/infer failed: {e}")
 
+    elif mode == "docres_appearance_mixed_v5_tiled_lift12":
+        try:
+            import tempfile, os, importlib.util
+            if _appearance_mixed is None:
+                spec = importlib.util.spec_from_file_location("appearance_test", "/home/wahyu/DocRes/test_appearance.py")
+                mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+                _appearance_mixed = mod.load_model("/home/wahyu/DocRes/finetune_logs/appearance_mixed_custom_v2_pilot_20260810/run1/best.pth")
+                _appearance_mixed._appearance_infer = mod.inference_appearance
+            with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tf:
+                image.save(tf.name); tmp = tf.name
+            mixed_bgr = _appearance_mixed._appearance_infer(_appearance_mixed, tmp, device=str(device)); os.unlink(tmp)
+            v5 = get_docres_ft_model("finetune_v5")
+            if v5 is None: raise RuntimeError("V5 model not loaded")
+            mixed_rgb = cv2.cvtColor(mixed_bgr, cv2.COLOR_BGR2RGB)
+            v5_rgb = _v5_tiled_infer(v5, mixed_bgr)
+            arr = np.clip(0.75 * v5_rgb.astype(np.float32) + 0.25 * mixed_rgb.astype(np.float32), 0, 255).astype(np.uint8)
+            lab = cv2.cvtColor(arr, cv2.COLOR_RGB2LAB).astype(np.float32)
+            luma, aa, bb = cv2.split(lab)
+            gray = cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY).astype(np.float32)
+            bg = cv2.GaussianBlur(gray, (0, 0), 45)
+            mask = cv2.GaussianBlur(np.clip((bg - gray - 3.0) / 55.0, 0.0, 1.0), (0, 0), 35)
+            edge = np.clip(np.abs(cv2.Laplacian(gray, cv2.CV_32F)) / 45.0, 0.0, 1.0)
+            mask *= 1.0 - 0.5 * edge
+            luma = np.clip(luma + np.minimum(luma * 0.12 * mask, 22.0), 0.0, 255.0)
+            result = Image.fromarray(cv2.cvtColor(cv2.merge([luma, aa, bb]).astype(np.uint8), cv2.COLOR_LAB2RGB))
+            return _pil_to_response(result)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Mixed V5 tiled LIFT12 load/infer failed: {e}")
+
     elif mode == "docres_appearance_mixed_v5_lift12":
         try:
             import tempfile, os, importlib.util
@@ -2113,11 +2142,45 @@ async def scan_document(request: Request, file: UploadFile = File(...), mode: st
         return _pil_to_response(result)
 
     else:
-        available = ["restore", "shadow_remove", "shadow_so", "shadow_so_aggressive", "shadow_effective_bg", "shadow_iterative", "docres_base", "docres_finetune", "docres_appearance_mixed_v5_lift12", "color_binarize", "enhance", "magic_enhance", "binarize",
+        available = ["restore", "shadow_remove", "shadow_so", "shadow_so_aggressive", "shadow_effective_bg", "shadow_iterative", "docres_base", "docres_finetune", "docres_appearance_mixed_v5_lift12", "docres_appearance_mixed_v5_tiled_lift12", "color_binarize", "enhance", "magic_enhance", "binarize",
                       "deskew", "cleanup", "clahe", "denoise", "sharpen", "docres"]
         raise HTTPException(status_code=400,
                             detail=f"Mode '{mode}' not available. Use one of: {available}")
 
+
+
+def _v5_tiled_infer(v5, bgr, tile=576, overlap=96):
+    """Run 576-trained V5 with tiled inference and feathered overlap."""
+    from backend.models.docres_model import deshadow_prompt
+    h, w = bgr.shape[:2]
+    prompt = deshadow_prompt(bgr)
+    full = np.concatenate([bgr, prompt], axis=2).astype(np.float32) / 255.0
+    stride = tile - overlap
+    acc = np.zeros((h, w, 3), np.float32)
+    weights = np.zeros((h, w, 1), np.float32)
+    win = np.ones((tile, tile), np.float32)
+    fade = np.linspace(0, 1, overlap)
+    win[:overlap, :] *= fade[:, None]
+    win[-overlap:, :] *= fade[::-1, None]
+    win[:, :overlap] *= fade[None, :]
+    win[:, -overlap:] *= fade[None, ::-1]
+    win = win[..., None]
+    ys = [0] if h <= tile else list(range(0, h - tile + 1, stride))
+    xs = [0] if w <= tile else list(range(0, w - tile + 1, stride))
+    if h > tile and ys[-1] != h - tile: ys.append(h - tile)
+    if w > tile and xs[-1] != w - tile: xs.append(w - tile)
+    with torch.inference_mode():
+        for y in ys:
+            for x in xs:
+                ph, pw = min(tile, h - y), min(tile, w - x)
+                patch = cv2.copyMakeBorder(full[y:y+ph, x:x+pw], 0, tile-ph, 0, tile-pw, cv2.BORDER_REFLECT)
+                tensor = torch.from_numpy(patch.transpose(2, 0, 1)).unsqueeze(0).to(v5.device).float()
+                out = torch.clamp(v5.model(tensor), 0, 1)[0].cpu().numpy().transpose(1, 2, 0)[:ph, :pw]
+                ww = win[:ph, :pw]
+                acc[y:y+ph, x:x+pw] += out * ww
+                weights[y:y+ph, x:x+pw] += ww
+    weights[weights == 0] = 1
+    return cv2.cvtColor(np.clip(acc / weights * 255, 0, 255).astype(np.uint8), cv2.COLOR_BGR2RGB)
 
 
 def _compare_mixed_chain(image, selected_mode):
@@ -2145,10 +2208,17 @@ def _compare_mixed_chain(image, selected_mode):
     v5 = get_docres_ft_model("finetune_v5")
     if v5 is None:
         raise RuntimeError("V5 model not loaded")
-    v5_rgb = np.array(v5.infer(Image.fromarray(mixed_rgb)))
+    if selected_mode == "docres_appearance_mixed_v5_tiled_lift12":
+        v5_rgb = _v5_tiled_infer(v5, mixed_bgr)
+    else:
+        v5_rgb = np.array(v5.infer(Image.fromarray(mixed_rgb)))
     arr = np.clip(0.75 * v5_rgb.astype(np.float32) + 0.25 * mixed_rgb.astype(np.float32), 0, 255).astype(np.uint8)
     if selected_mode == "docres_appearance_mixed_v5":
         return Image.fromarray(arr), "Mixed best iter1500 + V5 Blend75"
+    if selected_mode == "docres_appearance_mixed_v5_tiled_lift12":
+        tiled_label = "Mixed best iter1500 + V5 tiled 576 overlap96 + Blend75 + inline LIFT12"
+    else:
+        tiled_label = "Mixed best iter1500 + V5 Blend75 + inline LIFT12"
     lab = cv2.cvtColor(arr, cv2.COLOR_RGB2LAB).astype(np.float32)
     luma, aa, bb = cv2.split(lab)
     gray = cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY).astype(np.float32)
@@ -2157,14 +2227,14 @@ def _compare_mixed_chain(image, selected_mode):
     edge = np.clip(np.abs(cv2.Laplacian(gray, cv2.CV_32F)) / 45.0, 0.0, 1.0)
     luma = np.clip(luma + np.minimum(luma * 0.12 * mask * (1.0 - 0.5 * edge), 22.0), 0.0, 255.0)
     result = cv2.cvtColor(cv2.merge([luma, aa, bb]).astype(np.uint8), cv2.COLOR_LAB2RGB)
-    return Image.fromarray(result), "Mixed best iter1500 + V5 Blend75 + inline LIFT12"
+    return Image.fromarray(result), tiled_label
 
 
 @app.post("/api/docres/compare")
 async def docres_compare(request: Request, file: UploadFile = File(...), task: str = Form("deshadowing"),
                          selected_mode: str = Form("docres_appearance_mixed")):
     """Compare Base against explicitly selected DocAI model/pipeline on same input."""
-    allowed = {"docres_base", "docres_appearance_mixed", "docres_appearance_mixed_v5", "docres_appearance_mixed_v5_lift12"}
+    allowed = {"docres_base", "docres_appearance_mixed", "docres_appearance_mixed_v5", "docres_appearance_mixed_v5_lift12", "docres_appearance_mixed_v5_tiled_lift12"}
     if selected_mode not in allowed:
         raise HTTPException(status_code=400, detail=f"Unsupported compare mode: {selected_mode}")
     unload_idle_models()
