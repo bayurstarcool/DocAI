@@ -44,6 +44,8 @@ FINETUNE_CHECKPOINTS = {
     'finetune_v1': DOCRES_DIR / 'finetune_logs' / 'best.pth',
     'finetune_v2': DOCRES_DIR / 'finetune_logs' / 'deshadow_v2_20260726_065847' / 'best.pth',
     'finetune_v3': DOCRES_DIR / 'finetune_logs' / 'deshadow_v3_20260728_021703' / 'iter_45000.pth',
+    'finetune_576': DOCRES_DIR / 'finetune_logs' / 'deshadow_v3_20260804_015921' / 'best.pth',
+    'finetune_v5': DOCRES_DIR / 'checkpoints' / 'candidates' / 'v5_full_epoch1_20260809.pth',
 }
 
 
@@ -226,7 +228,7 @@ class DocResONNX:
         bg = cv2.merge(bg)
         return cv2.resize(bg, (w, h))
     
-    def infer(self, img, im_size=None):
+    def infer(self, img, im_size=None, task="deshadowing"):
         self._ensure_loaded()
         
         if isinstance(img, Image.Image):
@@ -269,7 +271,7 @@ class DocResModel:
         print(f"[OK] DocRes loaded ({label}), im_size={im_size}, device={device}")
 
     @torch.inference_mode()
-    def infer(self, img, im_size=None):
+    def infer(self, img, im_size=None, task="deshadowing"): 
         if isinstance(img, Image.Image):
             img_np = cv2.cvtColor(np.array(img.convert('RGB')), cv2.COLOR_RGB2BGR)
         elif isinstance(img, np.ndarray):
@@ -400,10 +402,10 @@ class DocResModel:
 _instances = {}
 
 
-def _get_or_create(key, checkpoint_path, device, label):
+def _get_or_create(key, checkpoint_path, device, label, im_size=1280):
     if key not in _instances:
         try:
-            _instances[key] = DocResModel(checkpoint_path, device=device, label=label)
+            _instances[key] = DocResModel(checkpoint_path, device=device, im_size=im_size, label=label)
         except Exception as e:
             print(f"[WARN] Failed to load DocRes ({label}): {e}")
             return None
@@ -421,6 +423,9 @@ def get_docres_base(device='cuda', im_size=1280):
 
 
 def get_docres_finetune(variant='finetune_v1', device='cuda', im_size=1280):
+    # 576-trained variant: use smaller inference size for CPU speed
+    if variant in ('finetune_576', 'finetune_v5'):
+        im_size = 768
     cp = FINETUNE_CHECKPOINTS.get(variant)
     if cp is None:
         print(f"[WARN] Unknown finetune variant: {variant}")
@@ -428,4 +433,4 @@ def get_docres_finetune(variant='finetune_v1', device='cuda', im_size=1280):
     if not cp.exists():
         print(f"[WARN] Finetune checkpoint not found: {cp}")
         return None
-    return _get_or_create(f'finetune_{variant}', cp, device, f'finetune_{variant}')
+    return _get_or_create(f'finetune_{variant}', cp, device, f'finetune_{variant}', im_size=im_size)

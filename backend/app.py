@@ -13,14 +13,16 @@ from pathlib import Path
 from fastapi import FastAPI, UploadFile, File, HTTPException, Request, Form
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse, Response
 
 import time
+import subprocess
+import tempfile
 from datetime import datetime, timedelta, timezone
 import numpy as np
 import cv2
 import torch
-from PIL import Image
+from PIL import Image, ImageOps, ImageEnhance
 
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -34,6 +36,7 @@ from backend.utils.traditional_methods import (
     enhance_text_sharpness, remove_background_noise, enhance_contrast_clahe,
     full_document_cleanup,
 )
+from backend.gpu_manager_simple import unload_idle_models, mark_used
 from backend.utils.shadowremove_enhance import (
     magic_document_enhance, adaptive_binarize, ai_shadow_postprocess,
 )
@@ -69,7 +72,20 @@ MAX_IMAGE_PIXELS = 25_000_000
 
 # --- Global Objects ---
 app = FastAPI(title="DocAI")
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+def _get_inference_device():
+    import json as _json
+    st_path = BASE_DIR.parent / "DocRes" / "finetune_logs" / "docres_status.json"
+    if st_path.exists():
+        try:
+            st = _json.loads(st_path.read_text())
+            if st.get("running"):
+                print("[INF] Training active -> CPU inference")
+                return torch.device("cpu")
+        except Exception:
+            pass
+    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+device = _get_inference_device()
 print(f"Using device: {device}")
 
 
@@ -104,10 +120,37 @@ def _load_checkpoint(model_cls, checkpoint_path, map_location, **kwargs):
         return None
 
 
-doc_restorer_model = _load_checkpoint(DocumentRestorerNet, MODEL_CHECKPOINT_PATH, device)
-doc_restorer_checkpoint = str(MODEL_CHECKPOINT_PATH.relative_to(BASE_DIR)) if doc_restorer_model is not None else None
-shadow_remover_model = _load_checkpoint(ShadowRemoverNet, CHECKPOINT_DIR / 'shadow_remover' / 'best.pth', device)
-doc_enhancer_model = _load_checkpoint(DocEnhancerNet, CHECKPOINT_DIR / 'doc_enhancer' / 'best.pth', device)
+# Lazy-load Document Restorer
+doc_restorer_model = None
+doc_restorer_checkpoint = None
+_doc_restorer_loaded = False
+def get_doc_restorer_model():
+    global doc_restorer_model, doc_restorer_checkpoint, _doc_restorer_loaded
+    if not _doc_restorer_loaded:
+        _doc_restorer_loaded = True
+        doc_restorer_model = _load_checkpoint(DocumentRestorerNet, MODEL_CHECKPOINT_PATH, device)
+        doc_restorer_checkpoint = str(MODEL_CHECKPOINT_PATH.relative_to(BASE_DIR)) if doc_restorer_model is not None else None
+    return doc_restorer_model
+
+# Lazy-load Shadow Remover
+shadow_remover_model = None
+_shadow_remover_loaded = False
+def get_shadow_remover_model():
+    global shadow_remover_model, _shadow_remover_loaded
+    if not _shadow_remover_loaded:
+        _shadow_remover_loaded = True
+        shadow_remover_model = _load_checkpoint(ShadowRemoverNet, CHECKPOINT_DIR / 'shadow_remover' / 'best.pth', device)
+    return shadow_remover_model
+
+# Lazy-load Doc Enhancer
+doc_enhancer_model = None
+_doc_enhancer_loaded = False
+def get_doc_enhancer_model():
+    global doc_enhancer_model, _doc_enhancer_loaded
+    if not _doc_enhancer_loaded:
+        _doc_enhancer_loaded = True
+        doc_enhancer_model = _load_checkpoint(DocEnhancerNet, CHECKPOINT_DIR / 'doc_enhancer' / 'best.pth', device)
+    return doc_enhancer_model
 
 # Lazy-load DocShadow SD7K
 _docshadow = None
@@ -119,6 +162,7 @@ def get_docshadow():
             _docshadow = get_docshadow_model(device=str(device))
         except Exception as e:
             print(f"[WARN] DocShadow SD7K not available: {e}")
+    mark_used("shadow")
     return _docshadow
 
 
@@ -131,6 +175,7 @@ def get_docres_model():
             _docres = get_docres(device=str(device))
         except Exception as e:
             print(f"[WARN] DocRes not available: {e}")
+    mark_used("docres")
     return _docres
 
 
@@ -141,6 +186,7 @@ def get_docres_base_model():
     if _docres_base is None:
         try: _docres_base = get_docres_base(device=str(device))
         except Exception as e: print(f"[WARN] DocRes base not available: {e}")
+    mark_used("base")
     return _docres_base
 
 _docres_ft = None
@@ -164,17 +210,28 @@ def get_docres_onnx_model():
     return _docres_onnx
 
 
+_appearance_mixed = None
 _docres_task = None
 def get_docres_task_model():
     global _docres_task
     if _docres_task is None:
-        base = get_docres_base_model()
-        if base is None:
+        import glob as _g
+        from pathlib import Path as _P
+        from backend.models.docres_model import DocResModel as _DRM
+        runs=sorted([d for d in (_P(BASE_DIR).parent/"DocRes"/"finetune_logs").glob("base_multitask_*") if (d/"best.pth").exists()],key=lambda x:x.stat().st_mtime,reverse=True)
+        if runs:
             try:
-                base = get_docres(device=str(device))
+                _dev = "cpu" if str(device)=="cpu" else str(device); _docres_task = _DRM(runs[0]/"best.pth", device=_dev, im_size=768, label="multitask_finetuned")
+                print(f"[OK] DocRes task model: fine-tuned {runs[0].name}/best.pth")
             except Exception as e:
-                print(f"[WARN] DocRes task model not available: {e}")
-        _docres_task = base
+                print(f"[WARN] Fine-tuned task model failed: {e}")
+        if _docres_task is None:
+            base = get_docres_base_model()
+            if base is None:
+                try: base = get_docres(device=str(device))
+                except Exception as e: print(f"[WARN] DocRes task model not available: {e}")
+            _docres_task = base
+    mark_used("task")
     return _docres_task
 
 
@@ -190,6 +247,9 @@ spa_dist = BASE_DIR / 'frontend' / 'dist'
 @app.get("/opencv.js")
 async def serve_opencv():
     return FileResponse(str(spa_dist / "opencv.js"), media_type="application/javascript")
+@app.get("/canny_edge.js")
+async def serve_canny_edge():
+    return FileResponse(str(spa_dist / "canny_edge.js"), media_type="application/javascript")
 login_html = BASE_DIR / 'frontend' / 'templates_bak' / 'login.html'
 app.mount("/assets", StaticFiles(directory=str(spa_dist / 'assets')), name="spa-assets")
 # removed
@@ -208,11 +268,32 @@ def require_api_auth(request: Request):
         raise HTTPException(status_code=401, detail='Unauthorized')
 
 
+def require_admin_page_auth(request: Request):
+    token = get_token_from_request(request)
+    username = validate_token_any(token) if token else None
+    if not username:
+        return RedirectResponse('/login', status_code=303)
+    if username != ADMIN_CREDENTIALS['username']:
+        return RedirectResponse('/magang', status_code=303)
+    return None
+
+
+def require_admin_api_auth(request: Request):
+    token = get_token_from_request(request)
+    username = validate_token_any(token) if token else None
+    if username != ADMIN_CREDENTIALS['username']:
+        raise HTTPException(status_code=403, detail='Hanya admin')
+
+
 def render_page(request: Request, template_name: str = None):
     redirect = require_page_auth(request)
     if redirect:
         return redirect
-    return FileResponse(str(spa_dist / 'index.html'))
+    html = (spa_dist / 'index.html').read_text()
+    if 'canny_edge.js' not in html:
+        html = html.replace('</head>', '<script src="/canny_edge.js"></script>\n</head>')
+    from fastapi.responses import HTMLResponse
+    return HTMLResponse(content=html)
 
 
 def _validate_image_upload(file: UploadFile, contents: bytes | None = None) -> bytes:
@@ -375,6 +456,14 @@ async def dataset_manager_detail_page(request: Request, slug: str):
 @app.get("/synthetic-shadow")
 async def synthetic_shadow_page(request: Request):
     return render_page(request)
+
+
+@app.get("/synthetic-dewarp")
+async def synthetic_dewarp_page(request: Request):
+    redirect = require_admin_page_auth(request)
+    if redirect:
+        return redirect
+    return FileResponse(str(spa_dist / 'index.html'))
 
 
 @app.get("/magang")
@@ -595,6 +684,68 @@ async def magang_upload(request: Request, shadow: UploadFile = File(...), clean:
     }
 
 
+def _find_magang_file(base: Path, username: str, kind: str, pair_name: str):
+    folder = base / username / kind
+    for ext in IMAGE_EXTENSIONS:
+        cand = folder / f"{pair_name}{ext}"
+        if cand.exists():
+            return cand
+    return None
+
+
+def _validate_magang_pair(username: str, pair_name: str):
+    base = BASE_DIR / "datasets" / "magang"
+    src_input = _find_magang_file(base, username, "input", pair_name)
+    src_target = _find_magang_file(base, username, "target", pair_name)
+    issues = []
+    info = {"valid": False, "issues": issues, "input": None, "target": None}
+    if not src_input:
+        issues.append("input missing")
+    if not src_target:
+        issues.append("target missing")
+    if issues:
+        return info
+    try:
+        with Image.open(src_input) as im:
+            im.verify()
+        with Image.open(src_target) as im:
+            im.verify()
+        with Image.open(src_input) as im_in, Image.open(src_target) as im_tg:
+            in_size = im_in.size
+            tg_size = im_tg.size
+        info["input"] = {"path": str(src_input.relative_to(BASE_DIR / 'datasets' / 'magang')), "size": in_size, "bytes": src_input.stat().st_size}
+        info["target"] = {"path": str(src_target.relative_to(BASE_DIR / 'datasets' / 'magang')), "size": tg_size, "bytes": src_target.stat().st_size}
+        if min(in_size) < 64:
+            issues.append("input too small")
+        if min(tg_size) < 64:
+            issues.append("target too small")
+        if src_input.stat().st_size == 0:
+            issues.append("input empty")
+        if src_target.stat().st_size == 0:
+            issues.append("target empty")
+        try:
+            from backend.utils.dataset_audit import audit_pair
+            audit = audit_pair(str(src_input), str(src_target))
+            score = float(audit.get("score", 0) or 0)
+            info["audit"] = {
+                "score": score,
+                "grade": audit.get("grade", "D"),
+                "reasons": audit.get("reasons", []),
+                "dimensions": audit.get("dimensions", {}),
+                "luminance": audit.get("luminance", {}),
+                "min_score": 90,
+                "passed": score >= 90,
+            }
+            if score < 90:
+                issues.append(f"score below 90: {score:.1f}")
+        except Exception as e:
+            issues.append(f"audit failed: {e}")
+    except Exception as e:
+        issues.append(f"image invalid: {e}")
+    info["valid"] = len(issues) == 0
+    return info
+
+
 @app.get("/api/magang/review")
 async def magang_review(request: Request):
     """Admin review: lihat semua dataset magang + thumbnail."""
@@ -635,11 +786,15 @@ async def magang_review(request: Request):
         
         pairs_list = []
         for stem in sorted(set(list(inputs.keys()) + list(targets.keys()))):
+            paired = stem in inputs and stem in targets
+            # Fast list only. Heavy audit score runs lazily via /api/magang/validate-pair
             pairs_list.append({
                 "name": stem,
                 "input": inputs.get(stem),
                 "target": targets.get(stem),
-                "paired": stem in inputs and stem in targets,
+                "paired": paired,
+                "validation": {"valid": paired, "issues": [] if paired else ["unpaired"]},
+                "valid": paired,
             })
         
         users.append({
@@ -654,45 +809,475 @@ async def magang_review(request: Request):
     return {"users": users, "total_pairs": total_pairs}
 
 
-@app.post("/api/magang/move")
-async def magang_move(request: Request):
-    """Admin memindahkan pair dari magang ke custom."""
-    from backend.auth import ADMIN_CREDENTIALS
+@app.post("/api/magang/validate-pair")
+async def magang_validate_pair(request: Request):
     token = get_token_from_request(request)
-    username = validate_token_any(token)
-    if username != ADMIN_CREDENTIALS["username"]:
+    admin_user = validate_token_any(token)
+    if admin_user != ADMIN_CREDENTIALS["username"]:
         raise HTTPException(status_code=403, detail="Hanya admin")
-    
     body = await request.json()
     username = body.get("username", "")
     pair_name = body.get("pair_name", "")
     if not username or not pair_name:
         raise HTTPException(status_code=400, detail="username dan pair_name required")
-    
-    src_input = BASE_DIR / "datasets" / "magang" / username / "input" / f"{pair_name}.png"
-    src_target = BASE_DIR / "datasets" / "magang" / username / "target" / f"{pair_name}.png"
-    if not src_input.exists() or not src_target.exists():
-        raise HTTPException(status_code=404, detail=f"Pair {pair_name} not found")
-    
-    # Copy to custom
+    return _validate_magang_pair(username, pair_name)
+
+
+def _move_magang_pair_to_custom(username: str, pair_name: str):
+    """Validate + move a single magang pair to custom. Returns (ok, detail_dict)."""
+    validation = _validate_magang_pair(username, pair_name)
+    if not validation.get("valid"):
+        return False, {"pair_name": pair_name, "moved": False,
+                       "error": "invalid", "validation": validation}
+    base = BASE_DIR / "datasets" / "magang"
+    src_input = _find_magang_file(base, username, "input", pair_name)
+    src_target = _find_magang_file(base, username, "target", pair_name)
+    if not src_input or not src_target:
+        return False, {"pair_name": pair_name, "moved": False, "error": "not_found"}
+
     custom_input = BASE_DIR / "datasets" / "paired" / "custom" / "custom" / "input"
     custom_target = BASE_DIR / "datasets" / "paired" / "custom" / "custom" / "target"
-    
-    # Find next pair index
+    custom_input.mkdir(parents=True, exist_ok=True)
+    custom_target.mkdir(parents=True, exist_ok=True)
+
     existing = list(custom_input.glob("pair_*.png"))
     idx = len(existing) + 1
     new_stem = f"pair_{idx:04d}"
-    
-    import shutil
-    shutil.copy2(str(src_input), str(custom_input / f"{new_stem}.png"))
-    shutil.copy2(str(src_target), str(custom_target / f"{new_stem}.png"))
-    
-    # Optionally delete from magang
+    # avoid collision if indices are sparse
+    while (custom_input / f"{new_stem}.png").exists():
+        idx += 1
+        new_stem = f"pair_{idx:04d}"
+
+    with Image.open(src_input) as im:
+        ImageOps.exif_transpose(im).convert("RGB").save(custom_input / f"{new_stem}.png", "PNG")
+    with Image.open(src_target) as im:
+        ImageOps.exif_transpose(im).convert("RGB").save(custom_target / f"{new_stem}.png", "PNG")
+
     src_input.unlink()
     src_target.unlink()
-    
-    return {"success": True, "new_pair": new_stem, "from": f"magang/{username}", "to": f"custom/custom"}
+    return True, {"pair_name": pair_name, "moved": True, "new_pair": new_stem}
 
+
+@app.post("/api/magang/move")
+async def magang_move(request: Request):
+    """Admin memindahkan pair dari magang ke custom."""
+    from backend.auth import ADMIN_CREDENTIALS
+    token = get_token_from_request(request)
+    admin = validate_token_any(token)
+    if admin != ADMIN_CREDENTIALS["username"]:
+        raise HTTPException(status_code=403, detail="Hanya admin")
+
+    body = await request.json()
+    username = body.get("username", "")
+    pair_name = body.get("pair_name", "")
+    if not username or not pair_name:
+        raise HTTPException(status_code=400, detail="username dan pair_name required")
+
+    ok, detail = _move_magang_pair_to_custom(username, pair_name)
+    if not ok:
+        raise HTTPException(status_code=400, detail={"message": "Gagal pindah", **detail})
+    return {"success": True, "new_pair": detail["new_pair"],
+            "from": f"magang/{username}", "to": "custom/custom"}
+
+
+@app.post("/api/magang/move-bulk")
+async def magang_move_bulk(request: Request):
+    """Admin bulk-move: pindahkan banyak pair sekaligus dari magang ke custom.
+    Body: {username, pair_names:[...]}. Returns per-pair result + summary."""
+    from backend.auth import ADMIN_CREDENTIALS
+    token = get_token_from_request(request)
+    admin = validate_token_any(token)
+    if admin != ADMIN_CREDENTIALS["username"]:
+        raise HTTPException(status_code=403, detail="Hanya admin")
+
+    body = await request.json()
+    username = body.get("username", "")
+    pair_names = body.get("pair_names", []) or []
+    if not username or not isinstance(pair_names, list) or not pair_names:
+        raise HTTPException(status_code=400, detail="username dan pair_names[] required")
+
+    results = []
+    moved = 0
+    for pn in pair_names:
+        try:
+            ok, detail = _move_magang_pair_to_custom(username, str(pn))
+        except Exception as e:
+            ok, detail = False, {"pair_name": str(pn), "moved": False, "error": str(e)}
+        if ok:
+            moved += 1
+        results.append(detail)
+    return {"success": True, "moved": moved, "requested": len(pair_names), "results": results}
+
+
+
+# =====================================================================
+#  SYNTHETIC DEWARP DATASET CURATION (ADMIN ONLY) — realtime jobs
+# =====================================================================
+import threading as _threading
+
+SYNTH_DEWARP_ROOT = BASE_DIR.parent / "controlpoints" / "web_synthetic"
+SYNTH_DEWARP_CANDIDATES = SYNTH_DEWARP_ROOT / "candidates" / "color"
+SYNTH_DEWARP_SELECTED = SYNTH_DEWARP_ROOT / "selected" / "color"
+SYNTH_DEWARP_REJECTED = SYNTH_DEWARP_ROOT / "rejected" / "color"
+SYNTH_DEWARP_PREVIEW = SYNTH_DEWARP_ROOT / "preview"
+SYNTH_DEWARP_UPLOADS = SYNTH_DEWARP_ROOT / "uploads"
+SYNTH_DEWARP_CUSTOM = BASE_DIR / "datasets" / "controlpoints_custom" / "color"
+SYNTH_GEN_SCRIPT = "/home/wahyu/synthetic-controlpoints/perturbed_images_generation_multiProcess.py"
+SYNTH_GEN_CWD = "/home/wahyu/synthetic-controlpoints"
+SYNTH_GEN_BG = "/home/wahyu/synthetic-controlpoints/background/"
+for _p in [SYNTH_DEWARP_CANDIDATES, SYNTH_DEWARP_SELECTED, SYNTH_DEWARP_REJECTED, SYNTH_DEWARP_PREVIEW, SYNTH_DEWARP_UPLOADS, SYNTH_DEWARP_CUSTOM]:
+    _p.mkdir(parents=True, exist_ok=True)
+
+# In-memory job registry for realtime synthetic generation
+_synth_jobs = {}
+_synth_jobs_lock = _threading.Lock()
+
+
+def _admin_only(request: Request):
+    token = get_token_from_request(request)
+    username = validate_token_any(token) if token else None
+    if username != ADMIN_CREDENTIALS["username"]:
+        raise HTTPException(status_code=403, detail="Hanya admin")
+
+
+def _synth_item_from_gw(path: Path):
+    return {
+        "name": path.name,
+        "stem": path.stem,
+        "size_mb": round(path.stat().st_size / 1024 / 1024, 2),
+        "image_url": f"/api/synthetic-dewarp/preview/{path.stem}.jpg",
+        "points_url": f"/api/synthetic-dewarp/preview/{path.stem}_points.jpg",
+    }
+
+
+def _render_gw_preview(gw_path: Path):
+    import pickle
+    with open(gw_path, 'rb') as f:
+        d = pickle.load(f)
+    img = d.get('image')
+    pts = d.get('fiducial_points')
+    if img is None:
+        raise HTTPException(status_code=400, detail='gw image missing')
+    jpg = SYNTH_DEWARP_PREVIEW / f"{gw_path.stem}.jpg"
+    pts_jpg = SYNTH_DEWARP_PREVIEW / f"{gw_path.stem}_points.jpg"
+    cv2.imwrite(str(jpg), img)
+    mark = img.copy()
+    if pts is not None:
+        flat = pts.reshape(-1, 2)
+        step = max(1, len(flat) // 160)
+        for pt in flat[::step]:
+            x, y = int(pt[1]), int(pt[0])
+            if 0 <= x < mark.shape[1] and 0 <= y < mark.shape[0]:
+                cv2.circle(mark, (x, y), 2, (0, 0, 255), -1)
+    cv2.imwrite(str(pts_jpg), mark)
+
+
+def _resolve_clean_input(input_name: str, source: str):
+    """Return absolute path of a clean input from inv3d target or uploads."""
+    safe = Path(input_name).name
+    if source == "upload":
+        cand = SYNTH_DEWARP_UPLOADS / safe
+    else:
+        cand = BASE_DIR / "datasets" / "paired" / "inv3d" / "target" / safe
+    return cand if cand.exists() else None
+
+
+def _synth_worker(job_id: str, clean_path: Path, count: int, input_stem: str):
+    import shutil, subprocess, time, glob
+    job = _synth_jobs[job_id]
+    try:
+        run_root = SYNTH_DEWARP_ROOT / "runs" / job_id
+        scan_dir = run_root / "scan"
+        out_dir = run_root / "out"
+        scan_dir.mkdir(parents=True, exist_ok=True)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(clean_path, scan_dir / clean_path.name)
+        cmd = [
+            "/home/wahyu/miniconda3/bin/python3", SYNTH_GEN_SCRIPT,
+            "--path", str(scan_dir) + "/",
+            "--bg_path", SYNTH_GEN_BG,
+            "--output_path", str(out_dir) + "/",
+            "--sys_num", str(max(1, (count + 1) // 2)),
+        ]
+        proc = subprocess.Popen(cmd, cwd=SYNTH_GEN_CWD, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT, text=True)
+        with _synth_jobs_lock:
+            job["pid"] = proc.pid
+            job["status"] = "running"
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        seen = set()
+        deadline = time.time() + 600
+        while time.time() < deadline:
+            if job.get("cancel"):
+                break
+            done = len(job["items"])
+            if done >= count:
+                break
+            for f in sorted((out_dir / "color").glob("*.gw")):
+                if f.name in seen:
+                    continue
+                # ensure file finished writing (size stable)
+                try:
+                    sz1 = f.stat().st_size
+                    time.sleep(0.4)
+                    if f.stat().st_size != sz1:
+                        continue
+                except OSError:
+                    continue
+                seen.add(f.name)
+                dst = SYNTH_DEWARP_CANDIDATES / f"{input_stem}_{ts}_{len(job['items'])+1}_{f.name}"
+                shutil.copy2(f, dst)
+                try:
+                    _render_gw_preview(dst)
+                except Exception as e:
+                    print(f"[WARN] preview failed: {e}")
+                with _synth_jobs_lock:
+                    job["items"].append(_synth_item_from_gw(dst))
+                if len(job["items"]) >= count:
+                    break
+            if proc.poll() is not None and not list((out_dir / "color").glob("*.gw")):
+                # process ended without producing; small grace then stop
+                time.sleep(2)
+                if len(job["items"]) == 0 and proc.poll() is not None:
+                    time.sleep(3)
+            time.sleep(1.5)
+        try:
+            proc.terminate()
+        except Exception:
+            pass
+        with _synth_jobs_lock:
+            job["status"] = "cancelled" if job.get("cancel") else "done"
+            job["finished_at"] = time.time()
+    except Exception as e:
+        with _synth_jobs_lock:
+            job["status"] = "error"
+            job["error"] = str(e)
+
+
+@app.get("/api/synthetic-dewarp/clean-inputs")
+async def synthetic_dewarp_clean_inputs(request: Request):
+    _admin_only(request)
+    items = []
+    root = BASE_DIR / "datasets" / "paired" / "inv3d" / "target"
+    for f in sorted(root.glob("*.png")):
+        clean = f.stem.isdigit()
+        items.append({"name": f.name, "source": "inv3d", "clean": clean, "url": f"/api/synthetic-dewarp/clean-preview/{f.name}"})
+    uploads = []
+    for f in sorted(SYNTH_DEWARP_UPLOADS.glob("*")):
+        if f.suffix.lower() in IMAGE_EXTENSIONS:
+            uploads.append({"name": f.name, "source": "upload", "clean": True, "url": f"/api/synthetic-dewarp/upload-preview/{f.name}"})
+    return {"items": items, "uploads": uploads, "count": len(items) + len(uploads)}
+
+
+SYNTH_DEWARP_MAX_BYTES = 5 * 1024 * 1024  # 5 MB
+
+
+@app.post("/api/synthetic-dewarp/upload")
+async def synthetic_dewarp_upload(request: Request, file: UploadFile = File(...)):
+    _admin_only(request)
+    contents = await file.read()
+    if len(contents) > SYNTH_DEWARP_MAX_BYTES:
+        raise HTTPException(status_code=400, detail=f"Ukuran gambar maksimal 5MB (file {len(contents)/1024/1024:.1f}MB)")
+    suffix = Path(file.filename or "").suffix.lower()
+    if suffix and suffix not in IMAGE_EXTENSIONS:
+        raise HTTPException(status_code=400, detail="Tipe file gambar tidak didukung.")
+    try:
+        import io as _iov
+        Image.open(_iov.BytesIO(contents)).verify()
+    except Exception:
+        raise HTTPException(status_code=400, detail="File bukan gambar valid.")
+    safe = Path(file.filename or "upload.png").name
+    stem = Path(safe).stem
+    dst = SYNTH_DEWARP_UPLOADS / f"{stem}.png"
+    i = 1
+    while dst.exists():
+        dst = SYNTH_DEWARP_UPLOADS / f"{stem}_{i}.png"
+        i += 1
+    import io as _io
+    img = Image.open(_io.BytesIO(contents)).convert("RGB")
+    img.save(dst, "PNG")
+    return {"success": True, "name": dst.name, "source": "upload", "url": f"/api/synthetic-dewarp/upload-preview/{dst.name}"}
+
+
+@app.get("/api/synthetic-dewarp/upload-preview/{filename}")
+async def synthetic_dewarp_upload_preview(request: Request, filename: str):
+    _admin_only(request)
+    safe = Path(filename).name
+    path = SYNTH_DEWARP_UPLOADS / safe
+    if not path.exists() or path.suffix.lower() not in IMAGE_EXTENSIONS:
+        raise HTTPException(status_code=404, detail="not found")
+    return FileResponse(str(path))
+
+
+@app.get("/api/synthetic-dewarp/clean-preview/{filename}")
+async def synthetic_dewarp_clean_preview(request: Request, filename: str):
+    _admin_only(request)
+    safe = Path(filename).name
+    path = BASE_DIR / "datasets" / "paired" / "inv3d" / "target" / safe
+    if not path.exists() or path.suffix.lower() not in IMAGE_EXTENSIONS:
+        raise HTTPException(status_code=404, detail="not found")
+    return FileResponse(str(path))
+
+
+@app.get("/api/synthetic-dewarp/preview/{filename}")
+async def synthetic_dewarp_preview(request: Request, filename: str):
+    _admin_only(request)
+    safe = Path(filename).name
+    path = SYNTH_DEWARP_PREVIEW / safe
+    if not path.exists() or path.suffix.lower() not in IMAGE_EXTENSIONS:
+        raise HTTPException(status_code=404, detail="not found")
+    return FileResponse(str(path))
+
+
+@app.get("/api/synthetic-dewarp/candidates")
+async def synthetic_dewarp_candidates(request: Request):
+    _admin_only(request)
+    for f in sorted(SYNTH_DEWARP_CANDIDATES.glob("*.gw")):
+        if not (SYNTH_DEWARP_PREVIEW / f"{f.stem}.jpg").exists():
+            try: _render_gw_preview(f)
+            except Exception as e: print(f"[WARN] preview failed {f}: {e}")
+    return {
+        "candidates": [_synth_item_from_gw(f) for f in sorted(SYNTH_DEWARP_CANDIDATES.glob("*.gw"))],
+        "selected_count": len(list(SYNTH_DEWARP_SELECTED.glob("*.gw"))),
+        "rejected_count": len(list(SYNTH_DEWARP_REJECTED.glob("*.gw"))),
+        "custom_count": len(list(SYNTH_DEWARP_CUSTOM.glob("*.gw"))),
+    }
+
+
+@app.post("/api/synthetic-dewarp/generate")
+async def synthetic_dewarp_generate(request: Request):
+    """Start async generation job. Returns job_id immediately; poll /job/{id}."""
+    _admin_only(request)
+    body = await request.json()
+    input_name = Path(body.get("input", "")).name
+    source = body.get("source", "inv3d")
+    count = max(1, min(int(body.get("count", 5)), 20))
+    clean_path = _resolve_clean_input(input_name, source)
+    if not clean_path:
+        raise HTTPException(status_code=404, detail="clean input not found")
+    job_id = uuid.uuid4().hex[:12]
+    with _synth_jobs_lock:
+        _synth_jobs[job_id] = {
+            "job_id": job_id, "status": "starting", "input": input_name, "source": source,
+            "count": count, "items": [], "cancel": False, "error": None,
+            "started_at": time.time(),
+        }
+    t = _threading.Thread(target=_synth_worker, args=(job_id, clean_path, count, Path(input_name).stem), daemon=True)
+    t.start()
+    return {"success": True, "job_id": job_id, "count": count}
+
+
+@app.get("/api/synthetic-dewarp/job/{job_id}")
+async def synthetic_dewarp_job(request: Request, job_id: str):
+    _admin_only(request)
+    with _synth_jobs_lock:
+        job = _synth_jobs.get(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="job not found")
+        return {
+            "job_id": job_id,
+            "status": job["status"],
+            "count": job["count"],
+            "done": len(job["items"]),
+            "items": list(job["items"]),
+            "error": job.get("error"),
+        }
+
+
+@app.post("/api/synthetic-dewarp/job/{job_id}/cancel")
+async def synthetic_dewarp_job_cancel(request: Request, job_id: str):
+    _admin_only(request)
+    with _synth_jobs_lock:
+        job = _synth_jobs.get(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="job not found")
+        job["cancel"] = True
+    return {"success": True}
+
+
+@app.post("/api/synthetic-dewarp/mark")
+async def synthetic_dewarp_mark(request: Request):
+    _admin_only(request)
+    body = await request.json()
+    names = [Path(n).name for n in body.get("names", [])]
+    action = body.get("action", "")
+    if action not in {"select", "reject"}:
+        raise HTTPException(status_code=400, detail="action must select/reject")
+    dst_dir = SYNTH_DEWARP_SELECTED if action == "select" else SYNTH_DEWARP_REJECTED
+    moved = []
+    import shutil
+    for name in names:
+        src = SYNTH_DEWARP_CANDIDATES / name
+        if src.exists():
+            shutil.move(str(src), str(dst_dir / name))
+            moved.append(name)
+    return {"success": True, "moved": moved, "action": action}
+
+
+@app.post("/api/synthetic-dewarp/commit-custom")
+async def synthetic_dewarp_commit_custom(request: Request):
+    """Move selected .gw samples into the custom dewarp training dataset."""
+    _admin_only(request)
+    body = await request.json()
+    names = body.get("names")
+    import shutil
+    if names:
+        srcs = [SYNTH_DEWARP_SELECTED / Path(n).name for n in names]
+    else:
+        srcs = list(SYNTH_DEWARP_SELECTED.glob("*.gw"))
+    committed = []
+    for src in srcs:
+        if src.exists() and src.suffix == ".gw":
+            shutil.move(str(src), str(SYNTH_DEWARP_CUSTOM / src.name))
+            committed.append(src.name)
+    return {
+        "success": True,
+        "committed": committed,
+        "custom_count": len(list(SYNTH_DEWARP_CUSTOM.glob("*.gw"))),
+        "custom_path": str(SYNTH_DEWARP_CUSTOM),
+    }
+
+
+@app.get("/api/synthetic-dewarp/custom")
+async def synthetic_dewarp_custom_list(request: Request):
+    _admin_only(request)
+    for f in sorted(SYNTH_DEWARP_CUSTOM.glob("*.gw")):
+        if not (SYNTH_DEWARP_PREVIEW / f"{f.stem}.jpg").exists():
+            try: _render_gw_preview(f)
+            except Exception as e: print(f"[WARN] custom preview failed {f}: {e}")
+    items = [_synth_item_from_gw(f) for f in sorted(SYNTH_DEWARP_CUSTOM.glob("*.gw"))]
+    return {"items": items, "count": len(items), "path": str(SYNTH_DEWARP_CUSTOM)}
+
+
+@app.post("/api/synthetic-dewarp/custom/remove")
+async def synthetic_dewarp_custom_remove(request: Request):
+    _admin_only(request)
+    body = await request.json()
+    names = [Path(n).name for n in body.get("names", [])]
+    to_selected = bool(body.get("to_selected", False))
+    import shutil
+    removed = []
+    for name in names:
+        src = SYNTH_DEWARP_CUSTOM / name
+        if src.exists() and src.suffix == ".gw":
+            if to_selected:
+                shutil.move(str(src), str(SYNTH_DEWARP_SELECTED / name))
+            else:
+                src.unlink()
+            removed.append(name)
+    return {"success": True, "removed": removed, "to_selected": to_selected, "custom_count": len(list(SYNTH_DEWARP_CUSTOM.glob("*.gw")))}
+
+
+@app.get("/api/synthetic-dewarp/selected")
+async def synthetic_dewarp_selected(request: Request):
+    _admin_only(request)
+    for f in sorted(SYNTH_DEWARP_SELECTED.glob("*.gw")):
+        if not (SYNTH_DEWARP_PREVIEW / f"{f.stem}.jpg").exists():
+            try: _render_gw_preview(f)
+            except Exception: pass
+    return {
+        "selected": [_synth_item_from_gw(f) for f in sorted(SYNTH_DEWARP_SELECTED.glob("*.gw"))],
+        "custom_count": len(list(SYNTH_DEWARP_CUSTOM.glob("*.gw"))),
+    }
 
 
 # =====================================================================
@@ -700,43 +1285,49 @@ async def magang_move(request: Request):
 # =====================================================================
 @app.get("/api/health")
 def health_check():
-    docshadow = get_docshadow()
+    # Read-only status. Do NOT call lazy loaders here; they allocate GPU VRAM.
     return {
         "status": "ok",
         "device": str(device),
         "models": {
-            "document_restorer": doc_restorer_model is not None,
-            "shadow_remover": shadow_remover_model is not None,
-            "doc_enhancer": doc_enhancer_model is not None,
-            "docshadow_sd7k": docshadow is not None,
-            "docres": get_docres_model() is not None,
+            "document_restorer": get_doc_restorer_model() is not None,
+            "shadow_remover": get_shadow_remover_model() is not None,
+            "doc_enhancer": get_doc_enhancer_model() is not None,
+            "docshadow_sd7k": _docshadow is not None,
+            "docres": _docres is not None,
+            "docres_base": _docres_base is not None,
+            "docres_task": _docres_task is not None,
+            "docres_onnx": _docres_onnx is not None,
         },
     }
 
 
 @app.get("/api/models/info")
 async def models_info(request: Request):
+    unload_idle_models()
     # require_api_auth(request)  # Public for image loading
     info = {}
     for name, model in [
-        ("document_restorer", doc_restorer_model),
-        ("shadow_remover", shadow_remover_model),
-        ("doc_enhancer", doc_enhancer_model),
+        ("document_restorer", get_doc_restorer_model()),
+        ("shadow_remover", get_shadow_remover_model()),
+        ("doc_enhancer", get_doc_enhancer_model()),
     ]:
         if model is not None and hasattr(model, 'get_model_info'):
             info[name] = model.get_model_info()
         else:
             info[name] = {"loaded": model is not None}
-    docres_mdl = get_docres_model()
-    if docres_mdl:
-        info["docres"] = docres_mdl.get_model_info()
+    # Read-only info. Avoid lazy-loading DocRes/DocShadow because status page must not allocate VRAM.
+    if _docres is not None:
+        info["docres"] = _docres.get_model_info()
     else:
         info["docres"] = {"loaded": False}
-    docshadow = get_docshadow()
-    if docshadow:
-        info["docshadow_sd7k"] = {"loaded": True, "weights": docshadow.list_available_weights()}
+    if _docshadow is not None:
+        info["docshadow_sd7k"] = {"loaded": True, "weights": _docshadow.list_available_weights()}
     else:
         info["docshadow_sd7k"] = {"loaded": False}
+    info["docres_base"] = {"loaded": _docres_base is not None}
+    info["docres_task"] = {"loaded": _docres_task is not None}
+    info["docres_onnx"] = {"loaded": _docres_onnx is not None}
     return info
 
 
@@ -790,6 +1381,96 @@ async def docres_training_status(request: Request):
             for k, v in data.items():
                 if isinstance(v, float) and (math.isinf(v) or math.isnan(v)):
                     data[k] = None
+            # Read config.json from log_dir if available
+            log_dir = data.get("log_dir")
+            if log_dir:
+                cfg_path = BASE_DIR.parent / "DocRes" / log_dir.lstrip("./") / "config.json"
+                if cfg_path.exists():
+                    try:
+                        data["config"] = _json.loads(cfg_path.read_text())
+                    except Exception:
+                        pass
+                # Read train.log for loss history
+                log_file = BASE_DIR.parent / "DocRes" / log_dir.lstrip("./") / "train.log"
+                if log_file.exists():
+                    try:
+                        lines = log_file.read_text().strip().split("\n")
+                        loss_history = []
+                        for line in lines:
+                            if "iter=" in line and "loss=" in line:
+                                parts = {}
+                                for kv in line.split():
+                                    if "=" in kv:
+                                        k, v = kv.split("=", 1)
+                                        parts[k] = float(v)
+                                if "iter" in parts and "loss" in parts:
+                                    loss_history.append({"iter": int(parts["iter"]), "loss": parts["loss"]})
+                        data["loss_history"] = loss_history
+                    except Exception:
+                        pass
+            # Reconcile stale external status. Trainer may exit without flipping
+            # docres_status.json; completion is authoritative when iter reaches
+            # total_iter, and no matching training process is running.
+            if data.get("iter") is not None and data.get("total_iter"):
+                try:
+                    completed = int(data["iter"]) >= int(data["total_iter"])
+                except (TypeError, ValueError):
+                    completed = False
+                if completed:
+                    data["running"] = False
+                    data["status"] = "completed"
+                    data["progress"] = 100.0
+                    data["eta_seconds"] = 0
+                    data["eta_minutes"] = 0.0
+
+            # Derive monitoring fields when external trainer omits them
+            if data.get("running") and data.get("iter") is not None and data.get("total_iter"):
+                import time as _time
+                speed = float(data.get("speed_it_per_sec") or 0.72)
+                data["speed_it_per_sec"] = speed
+                data["eta_seconds"] = int((data["total_iter"] - data["iter"]) / max(speed, 1e-6))
+                if not data.get("started_at"):
+                    data["started_at"] = _time.strftime("%Y-%m-%dT%H:%M:%S+00:00", _time.gmtime(_time.time() - data["iter"] / speed))
+                data["estimated_finish_at"] = _time.strftime("%Y-%m-%dT%H:%M:%S+00:00", _time.gmtime(_time.time() + data["eta_seconds"]))
+            if data.get("best_score") is None and log_dir:
+                import re as _re
+                log_file = BASE_DIR.parent / "DocRes" / log_dir.lstrip("./") / "train.log"
+                if log_file.exists():
+                    vals=[]
+                    for line in log_file.read_text().splitlines():
+                        m=_re.search(r"iter=(\d+)\s+loss=([\d.]+)",line)
+                        if m: vals.append((float(m.group(2)),int(m.group(1))))
+                    if vals:
+                        best_iter=min(vals)[1]; data["best_score"]=min(vals)[0]; data["best_checkpoint"]=f"iter_{best_iter}.pth"
+
+            # Normalize external DocRes status aliases for frontend monitor
+            if data.get("speed_it_per_sec") is not None:
+                data["speed"] = data["speed_it_per_sec"]
+            if data.get("eta_seconds") is not None:
+                data["eta"] = data["eta_seconds"]
+                data["eta_minutes"] = round(data["eta_seconds"] / 60, 1)
+            if data.get("started_at"):
+                data["start_time"] = data["started_at"]
+            if data.get("estimated_finish_at"):
+                data["finish_time"] = data["estimated_finish_at"]
+            if data.get("best_score") is None:
+                data["best_score"] = data.get("best_loss")
+
+            # Add WIB timestamps
+            if data.get("started_at"):
+                from datetime import datetime, timezone, timedelta
+                wib = timezone(timedelta(hours=7))
+                try:
+                    started = datetime.fromisoformat(data["started_at"]).replace(tzinfo=timezone.utc)
+                    data["started_at_wib"] = started.astimezone(wib).strftime("%d %b %Y %H:%M WIB")
+                    if data.get("eta_seconds") and data["eta_seconds"] > 0:
+                        finish_utc = started + timedelta(seconds=data["eta_seconds"])
+                        data["finish_at_wib"] = finish_utc.astimezone(wib).strftime("%d %b %Y %H:%M WIB")
+                        h = int(data["eta_seconds"] // 3600)
+                        m = int((data["eta_seconds"] % 3600) // 60)
+                        data["eta_human"] = f"{h}h {m}m"
+                except Exception:
+                    pass
             return data
         except Exception:
             pass
@@ -797,6 +1478,7 @@ async def docres_training_status(request: Request):
 
 @app.get("/api/system/status")
 async def system_status(request: Request):
+    unload_idle_models()
     # require_api_auth(request)  # Public for image loading
     try:
         import psutil
@@ -865,7 +1547,228 @@ async def system_status(request: Request):
 
 
 # =====================================================================
-#  CORE SCANNING ENDPOINTS
+
+@app.post("/api/detect_edges")
+async def detect_edges(request: Request, file: UploadFile = File(...), method: str = Form("opencv")):
+    """Detect document corners, return JSON points in ORIGINAL image coords.
+    Does NOT crop -- frontend draws draggable points, manual panel stays visible.
+    method: 'opencv' (fast) or 'grabcut' (slower, better on tilted photos).
+    Response: {corners:[[x,y]*4], confidence, is_full, width, height, method}
+    corners order: tl,tr,br,bl. If is_full=true, corners = near-full inset."""
+    try:
+        image = _read_image(file)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Image read error: {e}")
+    import cv2 as _cv2
+    import numpy as _np
+    from backend.doc_edge_detect import detect_corners, detect_corners_grabcut, detect_corners_auto
+    img_np = _cv2.cvtColor(_np.array(image.convert("RGB")), _cv2.COLOR_RGB2BGR)
+    H, W = img_np.shape[:2]
+    chosen = method
+    if method == "grabcut":
+        corners, conf, is_full = detect_corners_grabcut(img_np)
+    elif method == "auto":
+        corners, conf, is_full, chosen = detect_corners_auto(img_np)
+    else:
+        method = "opencv"
+        corners, conf, is_full = detect_corners(img_np)
+    method = chosen
+    if corners is None or is_full:
+        m = 0.01
+        corners = _np.array([[W * m, H * m], [W * (1 - m), H * m],
+                             [W * (1 - m), H * (1 - m)], [W * m, H * (1 - m)]], _np.float32)
+        is_full = True
+    return JSONResponse({
+        "corners": [[float(x), float(y)] for x, y in corners],
+        "confidence": round(float(conf), 3),
+        "is_full": bool(is_full),
+        "width": int(W),
+        "height": int(H),
+        "method": method,
+    })
+
+
+@app.post("/api/crop")
+async def crop_document(request: Request, file: UploadFile = File(...), method: str = Form("opencv")):
+    # Crop document: opencv (fast) or sam (accurate)
+    try:
+        image = _read_image(file)
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        raise HTTPException(status_code=400, detail=f"Image read error: {e}")
+
+    import tempfile, subprocess, os
+
+    if method == "sam":
+        # SAM crop (accurate, ~10s CPU)
+        tmp_in = tempfile.mktemp(suffix=".jpg")
+        tmp_out = tempfile.mktemp(suffix=".jpg")
+        try:
+            image.save(tmp_in)
+            result = subprocess.run(
+                ["/home/wahyu/miniconda3/bin/python3", "backend/sam_document_crop.py", tmp_in, tmp_out],
+                capture_output=True, text=True, cwd=str(BASE_DIR), timeout=120)
+            if os.path.exists(tmp_out):
+                with open(tmp_out, "rb") as f:
+                    return StreamingResponse(iter([f.read()]), media_type="image/jpeg")
+            else:
+                raise HTTPException(status_code=500, detail=f"SAM crop failed: {result.stderr[:200]}")
+        finally:
+            for fp in [tmp_in, tmp_out]:
+                if os.path.exists(fp): os.unlink(fp)
+    else:
+        # Robust 8-point crop: multi-pass + midpoint detection
+        import cv2, numpy as np
+        img_np = cv2.cvtColor(np.array(image.convert("RGB")), cv2.COLOR_RGB2BGR)
+        h_orig, w_orig = img_np.shape[:2]
+        gray = cv2.cvtColor(img_np, cv2.COLOR_BGR2GRAY)
+
+        def order_points(pts):
+            pts = pts.reshape(4, 2).astype(np.float32)
+            s = pts.sum(axis=1); r = np.zeros((4,2), dtype=np.float32)
+            r[0] = pts[np.argmin(s)]; r[2] = pts[np.argmax(s)]
+            d = np.diff(pts, axis=1); r[1] = pts[np.argmin(d)]; r[3] = pts[np.argmax(d)]
+            return r
+
+        def find_quad(cnts, min_area_ratio=0.05):
+            for c in sorted(cnts, key=cv2.contourArea, reverse=True)[:5]:
+                area = cv2.contourArea(c)
+                if area < h_orig * w_orig * min_area_ratio: continue
+                peri = cv2.arcLength(c, True)
+                for eps in [0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.08, 0.10]:
+                    approx = cv2.approxPolyDP(c, eps*peri, True)
+                    if len(approx) == 4 and cv2.isContourConvex(approx):
+                        pts = approx.reshape(4, 2).astype(np.float32)
+                        if cv2.contourArea(pts) > h_orig * w_orig * min_area_ratio:
+                            return pts
+            return None
+
+        def refine_corners(gray, corners, radius=15):
+            """Refine corner positions by finding strongest edge nearby"""
+            blurred = cv2.GaussianBlur(gray, (5,5), 0)
+            edges = cv2.Canny(blurred, 50, 150)
+            refined = []
+            for cx, cy in corners:
+                x1 = max(0, int(cx) - radius)
+                y1 = max(0, int(cy) - radius)
+                x2 = min(gray.shape[1], int(cx) + radius)
+                y2 = min(gray.shape[0], int(cy) + radius)
+                roi = edges[y1:y2, x1:x2]
+                if roi.size == 0:
+                    refined.append([cx, cy])
+                    continue
+                # Find point with max gradient in ROI
+                ys, xs = np.where(roi > 0)
+                if len(xs) > 0:
+                    best_i = np.argmax(roi[ys, xs])
+                    refined.append([x1 + xs[best_i], y1 + ys[best_i]])
+                else:
+                    refined.append([cx, cy])
+            return np.array(refined, dtype=np.float32)
+
+        def get_midpoints(corners):
+            """Calculate 4 midpoints between consecutive corners"""
+            midpts = []
+            for i in range(4):
+                j = (i + 1) % 4
+                mx = (corners[i][0] + corners[j][0]) / 2
+                my = (corners[i][1] + corners[j][1]) / 2
+                midpts.append([mx, my])
+            return np.array(midpts, dtype=np.float32)
+
+        def detect_from_threshold(gray, method_params):
+            """Run detection with specific parameters, return 4 corners or None"""
+            block_size, C, morph_op, morph_iter = method_params
+            adaptive = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                               cv2.THRESH_BINARY, block_size, C)
+            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+            if morph_op == 'close':
+                processed = cv2.morphologyEx(adaptive, cv2.MORPH_CLOSE, kernel, iterations=morph_iter)
+            else:
+                processed = cv2.morphologyEx(adaptive, cv2.MORPH_OPEN, kernel, iterations=morph_iter)
+            cnts, _ = cv2.findContours(processed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            return find_quad(cnts)
+
+        def detect_from_otsu(gray):
+            """OTSU-based detection"""
+            _, otsu = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            cnts, _ = cv2.findContours(otsu, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            return find_quad(cnts)
+
+        def detect_from_canny(gray):
+            """Canny-based detection"""
+            blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+            edges = cv2.Canny(blurred, 30, 100)
+            dilated = cv2.dilate(edges, np.ones((3,3), np.uint8), iterations=2)
+            cnts, _ = cv2.findContours(dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            return find_quad(cnts)
+
+        # Multi-pass detection with different parameters
+        all_corners = []
+        
+        # Pass 1: OTSU
+        q = detect_from_otsu(gray)
+        if q is not None: all_corners.append(q)
+        
+        # Pass 2: OTSU on inverted
+        _, otsu_inv = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        cnts_inv, _ = cv2.findContours(otsu_inv, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        q = find_quad(cnts_inv)
+        if q is not None: all_corners.append(q)
+        
+        # Pass 3: Canny
+        q = detect_from_canny(gray)
+        if q is not None: all_corners.append(q)
+        
+        # Pass 4-6: Adaptive with different block sizes
+        for bs in [11, 15, 21]:
+            for C in [2, 5]:
+                q = detect_from_threshold(gray, (bs, C, 'close', 2))
+                if q is not None: all_corners.append(q)
+        
+        # Pass 7: Adaptive with morph open
+        q = detect_from_threshold(gray, (15, 5, 'open', 1))
+        if q is not None: all_corners.append(q)
+
+        if not all_corners:
+            # Final fallback: bounding box
+            _, otsu = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            cnts, _ = cv2.findContours(otsu, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            if cnts:
+                c = max(cnts, key=cv2.contourArea)
+                x, y, w, h = cv2.boundingRect(c)
+                cropped = img_np[y:y+h, x:x+w]
+                _, buf = cv2.imencode(".jpg", cropped, [cv2.IMWRITE_JPEG_QUALITY, 92])
+                return StreamingResponse(iter([buf.tobytes()]), media_type="image/jpeg")
+            raise HTTPException(status_code=400, detail="Could not detect document edges")
+
+        # Filter out quads too close to full image (likely wrong detection)
+        filtered = [q for q in all_corners if cv2.contourArea(q) / (h_orig * w_orig) < 0.90]
+        if not filtered:
+            filtered = all_corners  # Fallback: use all
+
+        # Average filtered corners
+        avg_corners = np.mean(filtered, axis=0).astype(np.float32)
+        avg_corners = order_points(avg_corners)
+
+        # Refine with edge detection
+        avg_corners = refine_corners(gray, avg_corners)
+
+        # Get 8 points (4 corners + 4 midpoints)
+        midpts = get_midpoints(avg_corners)
+        eight_points = np.vstack([avg_corners, midpts])
+
+        # Warp using 4 corners
+        tl, tr, br, bl = avg_corners
+        ww = int(max(np.linalg.norm(br-bl), np.linalg.norm(tr-tl)))
+        hh = int(max(np.linalg.norm(tr-br), np.linalg.norm(tl-bl)))
+        ww, hh = max(ww, 64), max(hh, 64)
+        dst = np.array([[0,0],[ww-1,0],[ww-1,hh-1],[0,hh-1]], dtype=np.float32)
+        M = cv2.getPerspectiveTransform(avg_corners, dst)
+        warped = cv2.warpPerspective(img_np, M, (ww, hh))
+
+        _, buf = cv2.imencode(".jpg", warped, [cv2.IMWRITE_JPEG_QUALITY, 92])
+        return StreamingResponse(iter([buf.tobytes()]), media_type="image/jpeg")#  CORE SCANNING ENDPOINTS
 # =====================================================================
 @app.post("/api/scan")
 async def scan_document(request: Request, file: UploadFile = File(...), mode: str = Form("restore"),
@@ -874,6 +1777,8 @@ async def scan_document(request: Request, file: UploadFile = File(...), mode: st
                          adj_saturation: float = Form(1.0), adj_sharpness: float = Form(1.0),
                          adj_gamma: float = Form(1.0), adj_white_balance: bool = Form(False),
                          adj_clahe: float = Form(0.0), variant: str = Form("finetune_v3")):
+    global _appearance_mixed
+    unload_idle_models()
     # require_api_auth(request)  # Public for image loading
     _ADJUST_CTX.set({
         "brightness": adj_brightness, "contrast": adj_contrast,
@@ -883,23 +1788,23 @@ async def scan_document(request: Request, file: UploadFile = File(...), mode: st
     })
     image = _read_image(file)
 
-    if mode == "restore" and doc_restorer_model is not None:
+    if mode == "restore" and get_doc_restorer_model() is not None:
         start = time.time()
         with torch.inference_mode():
             restored, mask, info = run_document_restoration_pipeline(
-                doc_restorer_model, image, device,
+                get_doc_restorer_model(), image, device,
                 tile_size=RESTORATION_TILE_SIZE, overlap=RESTORATION_TILE_OVERLAP,
                 mode=pipeline_mode, shadow_strength=shadow_strength,
             )
         elapsed = round((time.time() - start) * 1000, 1)
         return _pil_to_response(restored)
 
-    elif mode == "shadow_remove" and shadow_remover_model is not None:
+    elif mode == "shadow_remove" and get_shadow_remover_model() is not None:
         start = time.time()
         img_np = np.array(image).astype(np.float32) / 255.0
         img_tensor = torch.from_numpy(img_np.transpose(2, 0, 1)).unsqueeze(0).to(device)
         with torch.inference_mode():
-            output = shadow_remover_model(img_tensor)
+            output = get_shadow_remover_model()(img_tensor)
         out_np = output[0].cpu().numpy().transpose(1, 2, 0)
         out_min, out_max = out_np.min(), out_np.max()
         if out_max - out_min > 1e-6:
@@ -908,12 +1813,12 @@ async def scan_document(request: Request, file: UploadFile = File(...), mode: st
         elapsed = round((time.time() - start) * 1000, 1)
         return _pil_to_response(result)
 
-    elif mode == "enhance" and doc_enhancer_model is not None:
+    elif mode == "enhance" and get_doc_enhancer_model() is not None:
         start = time.time()
         img_np = np.array(image).astype(np.float32) / 255.0
         img_tensor = torch.from_numpy(img_np.transpose(2, 0, 1)).unsqueeze(0).to(device)
         with torch.inference_mode():
-            output = doc_enhancer_model(img_tensor)
+            output = get_doc_enhancer_model()(img_tensor)
         result_img = output.get('enhanced', output[0] if isinstance(output, (tuple, list)) else output)
         if isinstance(result_img, torch.Tensor):
             result_img = result_img[0].cpu().numpy().transpose(1, 2, 0) * 255
@@ -954,6 +1859,15 @@ async def scan_document(request: Request, file: UploadFile = File(...), mode: st
         start = time.time()
         mdl = get_docres_base_model()
         if mdl is None:
+            # Force retry load
+            try:
+                from backend.models.docres_model import get_docres_base as _grb
+                mdl = _grb(device=str(device))
+                import backend.app as _app
+                _app._docres_base = mdl
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=f"DocRes base load failed: {e}")
+        if mdl is None:
             raise HTTPException(status_code=500, detail="DocRes base model not loaded")
         result = mdl.infer(image)
         elapsed = round((time.time() - start) * 1000, 1)
@@ -984,6 +1898,71 @@ async def scan_document(request: Request, file: UploadFile = File(...), mode: st
         elapsed = round((time.time() - start) * 1000, 1)
         return _pil_to_response(result)
 
+    elif mode == "docres_appearance_mixed_v5":
+        try:
+            import tempfile, os, importlib.util
+            if _appearance_mixed is None:
+                spec = importlib.util.spec_from_file_location("appearance_test", "/home/wahyu/DocRes/test_appearance.py")
+                mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+                _appearance_mixed = mod.load_model("/home/wahyu/DocRes/finetune_logs/appearance_mixed_custom_v2_pilot_20260810/run1/best.pth")
+                _appearance_mixed._appearance_infer = mod.inference_appearance
+            with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tf:
+                image.save(tf.name); tmp = tf.name
+            mixed = _appearance_mixed._appearance_infer(_appearance_mixed, tmp, device=str(device)); os.unlink(tmp)
+            v5 = get_docres_ft_model("finetune_v5")
+            if v5 is None: raise RuntimeError("V5 model not loaded")
+            v5out = np.array(v5.infer(Image.fromarray(cv2.cvtColor(mixed, cv2.COLOR_BGR2RGB))))
+            result = Image.fromarray(np.clip(0.75 * np.array(v5out, dtype=np.float32) + 0.25 * cv2.cvtColor(mixed, cv2.COLOR_BGR2RGB), 0, 255).astype(np.uint8))
+            arr=np.array(result).astype(np.float32); gray=cv2.cvtColor(arr.astype(np.uint8),cv2.COLOR_RGB2GRAY).astype(np.float32); bg=cv2.GaussianBlur(gray,(0,0),45); mask=cv2.GaussianBlur(np.clip((bg-gray-3)/55,0,1),(0,0),35); edge=np.clip(np.abs(cv2.Laplacian(gray,cv2.CV_32F))/45,0,1); mask*=1-.5*edge; arr=np.clip(arr*(1+mask[...,None]*.15),0,255).astype(np.uint8); return _pil_to_response(Image.fromarray(arr))
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Mixed V5 load/infer failed: {e}")
+
+    elif mode == "docres_appearance_mixed_v5_lift12":
+        try:
+            import tempfile, os, importlib.util
+            if _appearance_mixed is None:
+                spec = importlib.util.spec_from_file_location("appearance_test", "/home/wahyu/DocRes/test_appearance.py")
+                mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+                _appearance_mixed = mod.load_model("/home/wahyu/DocRes/finetune_logs/appearance_mixed_custom_v2_pilot_20260810/run1/best.pth")
+                _appearance_mixed._appearance_infer = mod.inference_appearance
+            with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tf:
+                image.save(tf.name); tmp = tf.name
+            mixed_bgr = _appearance_mixed._appearance_infer(_appearance_mixed, tmp, device=str(device)); os.unlink(tmp)
+            v5 = get_docres_ft_model("finetune_v5")
+            if v5 is None:
+                raise RuntimeError("V5 model not loaded")
+            mixed_rgb = cv2.cvtColor(mixed_bgr, cv2.COLOR_BGR2RGB)
+            v5_rgb = np.array(v5.infer(Image.fromarray(mixed_rgb)))
+            arr = np.clip(0.75 * v5_rgb.astype(np.float32) + 0.25 * mixed_rgb.astype(np.float32), 0, 255).astype(np.uint8)
+            lab = cv2.cvtColor(arr, cv2.COLOR_RGB2LAB).astype(np.float32)
+            luma, aa, bb = cv2.split(lab)
+            gray = cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY).astype(np.float32)
+            bg = cv2.GaussianBlur(gray, (0, 0), 45)
+            mask = np.clip((bg - gray - 3.0) / 55.0, 0.0, 1.0)
+            mask = cv2.GaussianBlur(mask, (0, 0), 35)
+            edge = np.clip(np.abs(cv2.Laplacian(gray, cv2.CV_32F)) / 45.0, 0.0, 1.0)
+            mask *= 1.0 - 0.5 * edge
+            luma = np.clip(luma + np.minimum(luma * 0.12 * mask, 22.0), 0.0, 255.0)
+            result = Image.fromarray(cv2.cvtColor(cv2.merge([luma, aa, bb]).astype(np.uint8), cv2.COLOR_LAB2RGB))
+            return _pil_to_response(result)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Mixed V5 LIFT12 load/infer failed: {e}")
+
+    elif mode == "docres_appearance_mixed":
+        try:
+            import tempfile, os, importlib.util
+            if _appearance_mixed is None:
+                spec = importlib.util.spec_from_file_location("appearance_test", "/home/wahyu/DocRes/test_appearance.py")
+                mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+                _appearance_mixed = mod.load_model("/home/wahyu/DocRes/finetune_logs/appearance_mixed_custom_v2_pilot_20260810/run1/best.pth")
+                _appearance_mixed._appearance_infer = mod.inference_appearance
+            with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tf:
+                image.save(tf.name); tmp = tf.name
+            result = _appearance_mixed._appearance_infer(_appearance_mixed, tmp, device=str(device)); os.unlink(tmp)
+            return _pil_to_response(Image.fromarray(cv2.cvtColor(result, cv2.COLOR_BGR2RGB)))
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Appearance mixed load/infer failed: {e}")
+
     elif mode == "docres_appearance":
         start = time.time()
         result = docres_task_infer(image, 'appearance')
@@ -1000,6 +1979,79 @@ async def scan_document(request: Request, file: UploadFile = File(...), mode: st
         from backend.docres_infer import docres_infer
         start = time.time()
         result = docres_infer(image, 'end2end')
+        elapsed = round((time.time() - start) * 1000, 1)
+        return _pil_to_response(result)
+
+    elif mode == "dewarpnet":
+        from backend.dewarpnet_infer import dewarpnet_infer
+        start = time.time()
+        result = dewarpnet_infer(image)
+        elapsed = round((time.time() - start) * 1000, 1)
+        return _pil_to_response(result)
+
+    elif mode == "opencv_dewarp":
+        from backend.opencv_dewarp import opencv_dewarp
+        start = time.time()
+        result, pts, angle = opencv_dewarp(image)
+        elapsed = round((time.time() - start) * 1000, 1)
+        return _pil_to_response(result)
+
+    elif mode == "controlpoints_dewarp":
+        from backend.controlpoints_infer import controlpoints_dewarp
+        start = time.time()
+        result = controlpoints_dewarp(image)
+        elapsed = round((time.time() - start) * 1000, 1)
+        return _pil_to_response(result)
+
+    elif mode == "geotr_doc3d_dewarp":
+        from backend.geotr_doc3d_infer import geotr_doc3d_dewarp
+        start = time.time()
+        result = geotr_doc3d_dewarp(image)
+        elapsed = round((time.time() - start) * 1000, 1)
+        return _pil_to_response(result)
+
+    elif mode == "geotr_doc3d_docres":
+        from backend.geotr_doc3d_infer import geotr_doc3d_dewarp
+        start = time.time()
+        result = geotr_doc3d_dewarp(image)
+        result = docres_task_infer(result, 'deshadowing')
+        result = docres_task_infer(result, 'appearance')
+        elapsed = round((time.time() - start) * 1000, 1)
+        return _pil_to_response(result)
+
+    elif mode == "sam_geotr_docres":
+        from backend.sam_geotr_pipeline import sam_document_crop
+        from backend.geotr_doc3d_infer import geotr_doc3d_dewarp
+        start = time.time()
+        result = sam_document_crop(image)
+        result = geotr_doc3d_dewarp(result)
+        result = docres_task_infer(result, 'deshadowing')
+        result = docres_task_infer(result, 'appearance')
+        elapsed = round((time.time() - start) * 1000, 1)
+        return _pil_to_response(result)
+
+    elif mode == "sam_perspective_appearance":
+        from backend.sam_geotr_pipeline import sam_document_crop
+        start = time.time()
+        result = sam_document_crop(image)
+        result = docres_task_infer(result, 'appearance')
+        elapsed = round((time.time() - start) * 1000, 1)
+        return _pil_to_response(result)
+
+    elif mode == "textline_refine_dewarp":
+        from backend.geotr_doc3d_infer import geotr_doc3d_dewarp
+        from backend.textline_refine import textline_refine_dewarp
+        start = time.time()
+        result = textline_refine_dewarp(image, geotr_doc3d_dewarp, docres_task_infer)
+        elapsed = round((time.time() - start) * 1000, 1)
+        return _pil_to_response(result)
+
+    elif mode == "auto_dewarp":
+        from backend.auto_dewarp_pipeline import auto_dewarp
+        from backend.geotr_doc3d_infer import geotr_doc3d_dewarp
+        from backend.docres_infer import docres_infer as _docres_infer_fn
+        start = time.time()
+        result, pipeline, score = auto_dewarp(image, _docres_infer_fn, geotr_doc3d_dewarp)
         elapsed = round((time.time() - start) * 1000, 1)
         return _pil_to_response(result)
 
@@ -1061,24 +2113,108 @@ async def scan_document(request: Request, file: UploadFile = File(...), mode: st
         return _pil_to_response(result)
 
     else:
-        available = ["restore", "shadow_remove", "shadow_so", "shadow_so_aggressive", "shadow_effective_bg", "shadow_iterative", "docres_base", "docres_finetune", "color_binarize", "enhance", "magic_enhance", "binarize",
+        available = ["restore", "shadow_remove", "shadow_so", "shadow_so_aggressive", "shadow_effective_bg", "shadow_iterative", "docres_base", "docres_finetune", "docres_appearance_mixed_v5_lift12", "color_binarize", "enhance", "magic_enhance", "binarize",
                       "deskew", "cleanup", "clahe", "denoise", "sharpen", "docres"]
         raise HTTPException(status_code=400,
                             detail=f"Mode '{mode}' not available. Use one of: {available}")
 
 
+
+@app.post("/api/docres/compare")
+async def docres_compare(request: Request, file: UploadFile = File(...), task: str = Form("deshadowing")):
+    """Compare base vs fine-tuned DocRes on same input."""
+    unload_idle_models()
+    image = _read_image(file)
+    start_total = time.time()
+
+    # Base model
+    base_mdl = get_docres_base_model()
+    base_result = None
+    base_ms = 0
+    if base_mdl:
+        t0 = time.time()
+        base_result = base_mdl.infer_task(image, task)
+        base_ms = round((time.time() - t0) * 1000)
+
+    # Fine-tuned model (same as task model)
+    ft_mdl = get_docres_task_model()
+    ft_result = None
+    ft_ms = 0
+    if ft_mdl:
+        t0 = time.time()
+        ft_result = ft_mdl.infer_task(image, task)
+        ft_ms = round((time.time() - t0) * 1000)
+
+    total_ms = round((time.time() - start_total) * 1000)
+
+    # Post-processing: gentle CLAHE + gamma
+    def apply_postprocess(img, clahe_clip=1.5, clahe_grid=16, gamma=1.05):
+        if img is None: return img
+        import cv2
+        arr = cv2.cvtColor(np.array(img.convert("RGB")), cv2.COLOR_RGB2LAB)
+        l_ch = arr[:,:,0]
+        clahe = cv2.createCLAHE(clipLimit=clahe_clip, tileGridSize=(clahe_grid, clahe_grid))
+        arr[:,:,0] = clahe.apply(l_ch)
+        result = cv2.cvtColor(arr, cv2.COLOR_LAB2RGB)
+        if abs(gamma - 1.0) > 0.001:
+            lut = np.array([((i / 255.0) ** (1.0/gamma)) * 255 for i in range(256)]).astype("uint8")
+            result = cv2.LUT(result, lut)
+        return Image.fromarray(result)
+
+    def detect_heavy_shadow(img, threshold=0.3):
+        if img is None: return None, None
+        import cv2
+        arr = np.array(img.convert("RGB"))
+        gray = cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY)
+        _, mask = cv2.threshold(gray, int(threshold*255), 255, cv2.THRESH_BINARY_INV)
+        mask = cv2.GaussianBlur(mask, (21,21), 0)
+        return img, Image.fromarray(mask)
+
+    def brighten_shadows(img, mask, strength=1.5):
+        if img is None or mask is None: return img
+        import cv2
+        arr = np.array(img.convert("RGB")).astype(float)
+        m = np.array(mask.convert("L")).astype(float) / 255.0
+        m = m[:,:,np.newaxis]
+        brightened = np.clip(arr + m * strength * 80, 0, 255).astype(np.uint8)
+        return Image.fromarray(brightened)
+
+    ft_processed = ft_result
+    if ft_result:
+        _, shadow_mask = detect_heavy_shadow(ft_result, threshold=0.25)
+        ft_processed = brighten_shadows(ft_result, shadow_mask, strength=1.3)
+
+    return {
+        "success": True,
+        "task": task,
+        "total_ms": total_ms,
+        "base": {
+            "image": f"data:image/png;base64,{_pil_to_b64(base_result)}" if base_result else None,
+            "ms": base_ms,
+        },
+        "finetuned": {
+            "image": f"data:image/png;base64,{_pil_to_b64(ft_result)}" if ft_result else None,
+            "ms": ft_ms,
+            "checkpoint": str(getattr(ft_mdl, "checkpoint_name", "unknown")),
+        },
+        "finetuned_clahe": {
+            "image": f"data:image/png;base64,{_pil_to_b64(ft_processed)}" if ft_processed else None,
+        },
+    }
+
 @app.post("/api/scan/json")
 async def scan_document_json(request: Request, file: UploadFile = File(...), mode: str = Form("restore"),
                               pipeline_mode: str = Form("full"), shadow_strength: float = Form(1.0)):
     """Return processing info alongside the scan result."""
+    unload_idle_models()
     # require_api_auth(request)  # Public for image loading
     image = _read_image(file)
     start = time.time()
 
-    if mode == "restore" and doc_restorer_model is not None:
+    if mode == "restore" and get_doc_restorer_model() is not None:
         with torch.inference_mode():
             restored, mask, info = run_document_restoration_pipeline(
-                doc_restorer_model, image, device,
+                get_doc_restorer_model(), image, device,
                 tile_size=RESTORATION_TILE_SIZE, overlap=RESTORATION_TILE_OVERLAP,
                 mode=pipeline_mode, shadow_strength=shadow_strength,
             )
@@ -1097,6 +2233,7 @@ async def scan_document_json(request: Request, file: UploadFile = File(...), mod
 
 @app.get("/api/uploads/{filename}")
 async def serve_upload(filename: str, request: Request):
+    unload_idle_models()
     # require_api_auth(request)  # Public for image loading
     file_path = UPLOAD_DIR / Path(filename).name
     if not file_path.exists():
@@ -1109,6 +2246,7 @@ async def serve_upload(filename: str, request: Request):
 # =====================================================================
 @app.post("/api/docshadow/infer")
 async def docshadow_infer(request: Request, file: UploadFile = File(...), weight: str = Form("SD7K")):
+    unload_idle_models()
     # require_api_auth(request)  # Public for image loading
     docres_mdl = get_docres_model()
     if docres_mdl:
@@ -1132,6 +2270,7 @@ async def docshadow_infer(request: Request, file: UploadFile = File(...), weight
 
 @app.get("/api/docshadow/weights")
 async def docshadow_weights(request: Request):
+    unload_idle_models()
     # require_api_auth(request)  # Public for image loading
     docres_mdl = get_docres_model()
     if docres_mdl:
@@ -1184,6 +2323,7 @@ async def ai_postprocess(request: Request,
                          original: UploadFile = File(...),
                          ai_result: UploadFile = File(...),
                          mask: UploadFile = File(None)):
+    unload_idle_models()
     # require_api_auth(request)  # Public for image loading
     original_img = _np_to_pil(np.array(_read_image(original)))
     ai_img = _np_to_pil(np.array(_read_image(ai_result)))
@@ -1202,6 +2342,7 @@ async def ai_postprocess(request: Request,
 async def batch_process(request: Request,
                         files: list[UploadFile] = File(...),
                         mode: str = Form("restore")):
+    unload_idle_models()
     # require_api_auth(request)  # Public for image loading
     results = []
     for f in files:
@@ -1209,10 +2350,10 @@ async def batch_process(request: Request,
         try:
             image = _read_image(f)
             start = time.time()
-            if mode == "restore" and doc_restorer_model is not None:
+            if mode == "restore" and get_doc_restorer_model() is not None:
                 with torch.inference_mode():
                     out, _, _ = run_document_restoration_pipeline(
-                        doc_restorer_model, image, device,
+                        get_doc_restorer_model(), image, device,
                         tile_size=RESTORATION_TILE_SIZE, overlap=RESTORATION_TILE_OVERLAP,
                     )
             elif mode == "magic_enhance":
@@ -1252,6 +2393,7 @@ async def batch_process(request: Request,
 # =====================================================================
 @app.get("/api/image-tests")
 async def list_image_tests(request: Request):
+    unload_idle_models()
     # require_api_auth(request)  # Public for image loading
     IMAGE_TEST_ROOT.mkdir(parents=True, exist_ok=True)
     tests = []
@@ -1264,6 +2406,7 @@ async def list_image_tests(request: Request):
 
 @app.get("/api/image-tests/contact-sheet-analysis")
 async def contact_sheet_analysis(request: Request):
+    unload_idle_models()
     # require_api_auth(request)  # Public for image loading
     candidates = [
         IMAGE_TEST_ROOT / 'contact_sheet_analysis_latest2.png',
@@ -1277,6 +2420,7 @@ async def contact_sheet_analysis(request: Request):
 
 @app.get("/api/image-tests/contact-sheets")
 async def list_contact_sheets(request: Request):
+    unload_idle_models()
     # require_api_auth(request)  # Public for image loading
     IMAGE_TEST_ROOT.mkdir(parents=True, exist_ok=True)
     sheets = []
@@ -1292,6 +2436,7 @@ async def list_contact_sheets(request: Request):
 
 @app.get("/api/image-tests/contact-sheets/{name}")
 async def preview_contact_sheet(request: Request, name: str):
+    unload_idle_models()
     # require_api_auth(request)  # Public for image loading
     safe_name = Path(name).name
     file_path = IMAGE_TEST_ROOT / safe_name
@@ -1301,6 +2446,7 @@ async def preview_contact_sheet(request: Request, name: str):
 
 @app.get("/api/image-tests/files")
 async def list_image_test_files(request: Request, test: str, path: str = ''):
+    unload_idle_models()
     # require_api_auth(request)  # Public for image loading
     try:
         test_root = IMAGE_TEST_ROOT / safe_workspace_name(test)
@@ -1324,6 +2470,7 @@ async def list_image_test_files(request: Request, test: str, path: str = ''):
 
 @app.get("/api/image-tests/preview")
 async def preview_image_test(request: Request, test: str, path: str):
+    unload_idle_models()
     # require_api_auth(request)  # Public for image loading
     try:
         test_root = IMAGE_TEST_ROOT / safe_workspace_name(test)
@@ -1339,6 +2486,7 @@ async def preview_image_test(request: Request, test: str, path: str):
 
 @app.post("/api/image-tests/upload")
 async def upload_image_test(request: Request, test: str = Form(...), destination: str = Form('input'), file: UploadFile = File(...)):
+    unload_idle_models()
     # require_api_auth(request)  # Public for image loading
     if destination not in {'input', 'output'}:
         raise HTTPException(status_code=400, detail='Invalid destination')
@@ -1358,6 +2506,7 @@ async def upload_image_test_pair(request: Request,
                                  test: str = Form(...),
                                  input_file: UploadFile = File(...),
                                  output_file: UploadFile = File(...)):
+    unload_idle_models()
     # require_api_auth(request)  # Public for image loading
     clean_name = (test or '').strip() or f"{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}"
     test_root = IMAGE_TEST_ROOT / safe_workspace_name(clean_name)
@@ -1383,6 +2532,7 @@ async def upload_image_test_pair(request: Request,
 
 @app.delete("/api/image-tests/item")
 async def delete_image_test_item(request: Request, test: str, path: str = ''):
+    unload_idle_models()
     # require_api_auth(request)  # Public for image loading
     try:
         test_root = IMAGE_TEST_ROOT / safe_workspace_name(test)
@@ -1407,6 +2557,7 @@ async def delete_image_test_item(request: Request, test: str, path: str = ''):
 # =====================================================================
 @app.get("/api/datasets/shadow7k/progress")
 async def shadow7k_progress(request: Request):
+    unload_idle_models()
     # require_api_auth(request)  # Public for image loading
     image_count = sum(1 for path in DOWNLOAD_ROOT.rglob('*') if path.is_file() and path.suffix.lower() in {'.png', '.jpg', '.jpeg'}) if DOWNLOAD_ROOT.exists() else 0
     size_mb = round(sum(path.stat().st_size for path in DOWNLOAD_ROOT.rglob('*') if path.is_file()) / (1024 * 1024), 2) if DOWNLOAD_ROOT.exists() else 0
@@ -1417,12 +2568,14 @@ async def shadow7k_progress(request: Request):
 
 @app.post("/api/datasets/download")
 async def start_dataset_download(request: Request):
+    unload_idle_models()
     # require_api_auth(request)  # Public for image loading
     return {'success': False, 'error': 'Download otomatis dinonaktifkan. Gunakan instruksi download manual di halaman ini.'}
 
 
 @app.post("/api/datasets/download/stop")
 async def stop_dataset_download(request: Request):
+    unload_idle_models()
     # require_api_auth(request)  # Public for image loading
     return {'success': True, 'message': 'Tidak ada download aktif.'}
 
@@ -1432,6 +2585,7 @@ async def stop_dataset_download(request: Request):
 # =====================================================================
 @app.get("/api/training/status")
 async def training_status(request: Request):
+    unload_idle_models()
     # require_api_auth(request)  # Public for image loading
     running = _training_is_running()
     meta = _stored_training_meta()
@@ -1560,6 +2714,7 @@ async def training_status(request: Request):
 
 @app.get("/api/training/preview/{filename}")
 async def training_preview(request: Request, filename: str, run_id: str = ''):
+    unload_idle_models()
     # require_api_auth(request)  # Public for image loading
     preview_root = CHECKPOINT_DIR / 'document_restorer' / 'runs' / Path(run_id).name if run_id else CHECKPOINT_DIR / 'document_restorer'
     preview_path = preview_root / 'previews' / Path(filename).name
@@ -1569,6 +2724,7 @@ async def training_preview(request: Request, filename: str, run_id: str = ''):
 
 @app.get("/api/training/runs")
 async def training_runs(request: Request):
+    unload_idle_models()
     # require_api_auth(request)  # Public for image loading
     runs_root = CHECKPOINT_DIR / 'document_restorer' / 'runs'
     runs = []
@@ -1593,6 +2749,7 @@ async def training_runs(request: Request):
 
 @app.get("/api/training/evaluation/status")
 async def evaluation_status(request: Request, output: str = 'evaluation/document_restorer'):
+    unload_idle_models()
     # require_api_auth(request)  # Public for image loading
     output = _safe_evaluation_output(output)
     output_path = BASE_DIR / output
@@ -1614,6 +2771,7 @@ async def evaluation_status(request: Request, output: str = 'evaluation/document
 
 @app.get("/api/training/evaluation/preview")
 async def evaluation_preview(request: Request, output: str = 'evaluation/document_restorer'):
+    unload_idle_models()
     # require_api_auth(request)  # Public for image loading
     output = _safe_evaluation_output(output)
     preview_path = BASE_DIR / output / 'preview_grid.png'
@@ -1623,6 +2781,7 @@ async def evaluation_preview(request: Request, output: str = 'evaluation/documen
 
 @app.get("/api/training/evaluation/metrics")
 async def evaluation_metrics(request: Request, output: str = 'evaluation/document_restorer'):
+    unload_idle_models()
     # require_api_auth(request)  # Public for image loading
     output = _safe_evaluation_output(output)
     metrics_path = BASE_DIR / output / 'metrics.csv'
@@ -1637,6 +2796,7 @@ async def evaluation_metrics(request: Request, output: str = 'evaluation/documen
 @app.get("/api/datasets")
 async def list_datasets(request: Request):
     """List all available datasets in data/datasets and datasets/"""
+    unload_idle_models()
     # require_api_auth(request)  # Public for image loading
     from backend.datasets.manager import RestorationDatasetManager
     import os
@@ -1820,7 +2980,7 @@ def _scan_paired_dataset(d: Path) -> dict:
 
 def _dataset_root(path: str) -> Path:
     root = (BASE_DIR / path).resolve()
-    allowed_roots = [(BASE_DIR / 'data' / 'datasets').resolve(), (BASE_DIR / 'datasets').resolve(), (BASE_DIR / 'datasets' / 'magang').resolve()]
+    allowed_roots = [(BASE_DIR / 'data' / 'datasets').resolve(), (BASE_DIR / 'datasets').resolve(), (BASE_DIR / 'datasets' / 'magang').resolve(), Path('/home/wahyu/DocRes/data/synthetic_appearance_v1').resolve()]
     if not any(root == allowed or allowed in root.parents for allowed in allowed_roots):
         raise HTTPException(status_code=400, detail='Dataset path outside allowed roots')
     if not root.is_dir():
@@ -1831,6 +2991,7 @@ def _dataset_root(path: str) -> Path:
 @app.get('/api/datasets/explorer')
 async def browse_dataset(request: Request, dataset: str, path: str = '', offset: int = 0, limit: int = 60):
     """Browse one registered dataset without allowing filesystem traversal."""
+    unload_idle_models()
     # require_api_auth(request)  # Public for image loading
     root = _dataset_root(dataset)
     current = (root / path).resolve()
@@ -1852,6 +3013,7 @@ async def browse_dataset(request: Request, dataset: str, path: str = '', offset:
 
 @app.get('/api/datasets/explorer/image')
 async def dataset_explorer_image(request: Request, dataset: str, path: str, size: int = 0):
+    unload_idle_models()
     # require_api_auth(request)  # Public for image loading
     root = _dataset_root(dataset)
     image_path = (root / path).resolve()
@@ -1878,6 +3040,7 @@ async def dataset_explorer_image(request: Request, dataset: str, path: str, size
 @app.get("/api/datasets/validate")
 async def validate_dataset(request: Request, path: str):
     """Validate a specific dataset path."""
+    unload_idle_models()
     # require_api_auth(request)  # Public for image loading
     from backend.datasets.manager import RestorationDatasetManager
     target = (BASE_DIR / path).resolve()
@@ -1914,6 +3077,7 @@ from backend.utils.dataset_audit import audit_pair, prepare_pair, prepare_datase
 @app.post("/api/datasets/audit-pair")
 async def api_audit_pair(request: Request):
     """Audit a shadow/clean image pair for dataset feasibility."""
+    unload_idle_models()
     # require_api_auth(request)  # Public for image loading
     import tempfile, os
 
@@ -1944,6 +3108,7 @@ async def api_audit_pair(request: Request):
 @app.post("/api/datasets/prepare")
 async def api_prepare_pair(request: Request):
     """Prepare a shadow/clean pair: resize, align, save to dataset dir."""
+    unload_idle_models()
     # require_api_auth(request)  # Public for image loading
     import tempfile, os
 
@@ -1980,6 +3145,7 @@ async def api_prepare_pair(request: Request):
 @app.get("/api/datasets/validate-pairs")
 async def api_validate_pairs(request: Request, path: str):
     """Validate all pairs in a prepared dataset directory."""
+    unload_idle_models()
     # require_api_auth(request)  # Public for image loading
 
     target = str(BASE_DIR / path)
@@ -1990,6 +3156,7 @@ async def api_validate_pairs(request: Request, path: str):
 @app.get("/api/datasets/audit-local")
 async def api_audit_local(request: Request, shadow: str, clean: str):
     """Audit local files on server by path."""
+    unload_idle_models()
     # require_api_auth(request)  # Public for image loading
     import os
 
@@ -2008,6 +3175,7 @@ async def api_audit_local(request: Request, shadow: str, clean: str):
 @app.post("/api/datasets/prepare-local")
 async def api_prepare_local(request: Request):
     """Prepare local files on server."""
+    unload_idle_models()
     # require_api_auth(request)  # Public for image loading
     import os
 
@@ -2037,11 +3205,13 @@ from backend.utils.dataset_audit import (
 
 @app.get("/api/datasets/custom")
 async def api_list_datasets(request: Request):
+    unload_idle_models()
     # require_api_auth(request)  # Public for image loading
     return {"datasets": list_datasets()}
 
 @app.post("/api/datasets/custom")
 async def api_create_dataset(request: Request):
+    unload_idle_models()
     # require_api_auth(request)  # Public for image loading
     form = await request.form()
     slug = form.get("slug", "")
@@ -2057,6 +3227,7 @@ async def api_create_dataset(request: Request):
 
 @app.get("/api/datasets/custom/{slug}")
 async def api_get_dataset(request: Request, slug: str):
+    unload_idle_models()
     # require_api_auth(request)  # Public for image loading
     ds = get_dataset(slug)
     if not ds:
@@ -2065,6 +3236,7 @@ async def api_get_dataset(request: Request, slug: str):
 
 @app.delete("/api/datasets/custom/{slug}")
 async def api_delete_dataset(request: Request, slug: str):
+    unload_idle_models()
     # require_api_auth(request)  # Public for image loading
     if not delete_dataset(slug):
         raise HTTPException(status_code=404, detail="Dataset not found")
@@ -2072,6 +3244,7 @@ async def api_delete_dataset(request: Request, slug: str):
 
 @app.put("/api/datasets/custom/{slug}")
 async def api_update_dataset(request: Request, slug: str):
+    unload_idle_models()
     # require_api_auth(request)  # Public for image loading
     form = await request.form()
     name = form.get("name")
@@ -2083,6 +3256,7 @@ async def api_update_dataset(request: Request, slug: str):
 
 @app.post("/api/datasets/custom/{slug}/audit")
 async def api_audit_in_dataset(request: Request, slug: str):
+    unload_idle_models()
     # require_api_auth(request)  # Public for image loading
     import tempfile
     ds_path = os.path.join("datasets/paired/custom", slug)
@@ -2105,6 +3279,7 @@ async def api_audit_in_dataset(request: Request, slug: str):
 
 @app.post("/api/datasets/custom/{slug}/add")
 async def api_add_to_dataset(request: Request, slug: str):
+    unload_idle_models()
     # require_api_auth(request)  # Public for image loading
     import tempfile
     ds_path = os.path.join("datasets/paired/custom", slug)
@@ -2127,6 +3302,7 @@ async def api_add_to_dataset(request: Request, slug: str):
 
 @app.delete("/api/datasets/custom/{slug}/{filename}")
 async def api_delete_pair(request: Request, slug: str, filename: str):
+    unload_idle_models()
     # require_api_auth(request)  # Public for image loading
     ds_path = os.path.join("datasets/paired/custom", slug)
     input_path = os.path.join(ds_path, "input", filename)
@@ -2143,10 +3319,83 @@ async def api_delete_pair(request: Request, slug: str, filename: str):
     return {"success": True, "deleted": deleted}
 
 
+@app.post("/api/datasets/custom/{slug}/move/{filename}")
+async def api_move_pair(request: Request, slug: str, filename: str):
+    """Move pair from one dataset to another. Body: { target_slug: str }"""
+    import shutil
+    body = await request.json()
+    target_slug = body.get("target_slug", "")
+    if not target_slug:
+        raise HTTPException(status_code=400, detail="target_slug required")
+    
+    src_path = os.path.join("datasets/paired/custom", slug)
+    dst_path = os.path.join("datasets/paired/custom", target_slug)
+    
+    if not os.path.exists(dst_path):
+        os.makedirs(os.path.join(dst_path, "input"), exist_ok=True)
+        os.makedirs(os.path.join(dst_path, "target"), exist_ok=True)
+    
+    moved = []
+    for role in ("input", "target"):
+        src = os.path.join(src_path, role, filename)
+        dst = os.path.join(dst_path, role, filename)
+        if os.path.exists(src):
+            shutil.move(src, dst)
+            moved.append(role)
+    
+    if not moved:
+        raise HTTPException(status_code=404, detail="File not found")
+    return {"success": True, "moved": moved, "from": slug, "to": target_slug}
+
+
+@app.get("/api/datasets/custom/{slug}/audit/{filename}")
+async def api_audit_single_pair(request: Request, slug: str, filename: str):
+    """Audit a single pair and return reasons."""
+    import numpy as np
+    from PIL import Image
+    
+    ds_path = os.path.join("datasets/paired/custom", slug)
+    in_path = os.path.join(ds_path, "input", filename)
+    gt_path = os.path.join(ds_path, "target", filename)
+    
+    if not os.path.exists(in_path) or not os.path.exists(gt_path):
+        raise HTTPException(status_code=404, detail="Pair not found")
+    
+    in_img = np.array(Image.open(in_path).convert("RGB"))
+    gt_img = np.array(Image.open(gt_path).convert("RGB"))
+    
+    reasons = []
+    brightness_diff = float(gt_img.mean() - in_img.mean())
+    gt_white_ratio = float((gt_img > 200).mean())
+    diff = float(np.abs(in_img.astype(float) - gt_img.astype(float)).mean())
+    
+    if brightness_diff <= 10:
+        reasons.append(f"Target kurang terang (delta={brightness_diff:.1f})")
+    if gt_white_ratio <= 0.5:
+        reasons.append(f"Target kurang bersih (white={gt_white_ratio:.2f})")
+    if diff <= 5:
+        reasons.append(f"Input/target terlalu mirip (diff={diff:.1f})")
+    
+    if in_img.size != gt_img.size:
+        reasons.append(f"Resolusi beda: input={list(in_img.shape[:2][::-1])} target={list(gt_img.shape[:2][::-1])}")
+    
+    return {
+        "filename": filename,
+        "valid": len(reasons) == 0,
+        "reasons": reasons,
+        "metrics": {
+            "brightness_diff": round(brightness_diff, 1),
+            "gt_white_ratio": round(gt_white_ratio, 3),
+            "pixel_diff": round(diff, 1),
+        }
+    }
+
+
 from backend.utils.dataset_audit import validate_dataset, get_recommendation
 
 @app.get("/api/datasets/custom/{slug}/validate")
 async def api_validate_dataset(request: Request, slug: str):
+    unload_idle_models()
     # require_api_auth(request)  # Public for image loading
     ds_path = os.path.join("datasets/paired/custom", slug)
     if not os.path.exists(ds_path):
@@ -2160,6 +3409,7 @@ async def api_validate_dataset(request: Request, slug: str):
 @app.post("/api/model/reload")
 async def reload_model(request: Request):
     """Reload best.pth from disk — allows testing model while training continues."""
+    unload_idle_models()
     # require_api_auth(request)  # Public for image loading
     global doc_restorer_model, doc_restorer_checkpoint
 
@@ -2189,6 +3439,7 @@ async def reload_model(request: Request):
 @app.get("/api/model/status")
 async def model_status(request: Request):
     """Check if model is loaded and ready for inference."""
+    unload_idle_models()
     # require_api_auth(request)  # Public for image loading
     best_path = CHECKPOINT_DIR / 'document_restorer' / 'best.pth'
     return {
@@ -2432,6 +3683,7 @@ def _monitor_training_process(proc):
 @app.post("/api/ocr/detect")
 async def ocr_detect(request: Request, file: UploadFile = File(...)):
     """Extract text from an uploaded document image using Tesseract OCR."""
+    unload_idle_models()
     # require_api_auth(request)  # Public for image loading
     try:
         contents = await file.read()
@@ -2465,6 +3717,7 @@ async def ocr_detect(request: Request, file: UploadFile = File(...)):
 @app.post("/api/ocr/detect-from-result")
 async def ocr_detect_from_result(request: Request):
     """Extract text from the last processed image blob."""
+    unload_idle_models()
     # require_api_auth(request)  # Public for image loading
     try:
         body = await request.json()
@@ -2484,33 +3737,89 @@ async def ocr_detect_from_result(request: Request):
 # =====================================================================
 #  FULL DOCUMENT PROCESSING PIPELINE (multi-step)
 # =====================================================================
+
+@app.post("/api/docres576/process-json")
+async def docres576_process_json(request: Request, file: UploadFile = File(...), adj_brightness: float = Form(1.0), adj_contrast: float = Form(1.0), task: str = Form("deshadowing")):
+    """Test current DocRes 576 best checkpoint on CPU without touching training GPU."""
+    unload_idle_models()
+    image = _read_image(file)
+    import glob as _g
+    import pathlib as _pl; runs=sorted([d for d in (BASE_DIR.parent/"DocRes"/"finetune_logs").glob("base_multitask_*") if (d/"best.pth").exists()],key=lambda x:x.stat().st_mtime,reverse=True); ckpt=runs[0]/"best.pth" if runs else BASE_DIR.parent/"DocRes"/"finetune_logs"/"deshadow_v3_20260804_015921"/"best.pth"
+    script = BASE_DIR.parent / "DocRes" / "test_deshadow.py"
+    if not ckpt.exists():
+        raise HTTPException(status_code=404, detail=f"DocRes 576 checkpoint not found: {ckpt}")
+    start_total = time.time()
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as inp:
+        image.save(inp.name)
+        in_path = inp.name
+    out_path = tempfile.NamedTemporaryFile(suffix=".png", delete=False).name
+    script = BASE_DIR.parent / "DocRes" / "inference.py"
+    try:
+        cmd = [str(BASE_DIR.parent / "miniconda3" / "bin" / "python3"), str(script), "--model_path", str(ckpt), "--im_path", in_path, "--out_folder", os.path.dirname(out_path), "--task", task]
+        _env = os.environ.copy(); _env["CUDA_VISIBLE_DEVICES"] = ""; proc = subprocess.run(cmd, cwd=str(BASE_DIR.parent / "DocRes"), capture_output=True, text=True, timeout=300, env=_env)
+        if proc.returncode != 0:
+            raise HTTPException(status_code=500, detail=(proc.stderr or proc.stdout)[-1000:])
+        final = Image.open(out_path).convert("RGB")
+        if abs(adj_brightness - 1.0) > 0.001:
+            final = ImageEnhance.Brightness(final).enhance(adj_brightness)
+        if abs(adj_contrast - 1.0) > 0.001:
+            final = ImageEnhance.Contrast(final).enhance(adj_contrast)
+        total_ms = round((time.time() - start_total) * 1000)
+        return {
+            "success": True,
+            "total_ms": total_ms,
+            "mode": "docres576_best",
+            "checkpoint": str(ckpt),
+            "image": f"data:image/png;base64,{_pil_to_b64(final)}",
+            "steps": [
+                {"name":"input","label":"Input","status":"done","time_ms":0,"info":f"Original size: {image.size[0]}x{image.size[1]}"},
+                {"name":"docres576","label":"DocRes 576 Best","status":"done","time_ms":total_ms,"info":"CPU inference, current best.pth"},
+                {"name":"adjust","label":"Brightness/Contrast","status":"done","time_ms":0,"info":f"brightness={adj_brightness}, contrast={adj_contrast}"},
+            ],
+            "pipeline": ["input", "docres576_best", "brightness_contrast"],
+        }
+    finally:
+        try: os.unlink(in_path)
+        except Exception: pass
+        try: os.unlink(out_path)
+        except Exception: pass
+
 @app.post("/api/pipeline/process")
 async def pipeline_process(request: Request, file: UploadFile = File(...)):
     """Run the document restoration pipeline in the production order."""
+    unload_idle_models()
     # require_api_auth(request)  # Public for image loading
-    if doc_restorer_model is None:
+    if get_doc_restorer_model() is None:
         raise HTTPException(status_code=503, detail='DocumentRestorerNet checkpoint not loaded')
     image = _read_image(file)
     with torch.inference_mode():
         final, _, _ = run_document_restoration_pipeline(
-            doc_restorer_model, image, device,
+            get_doc_restorer_model(), image, device,
             tile_size=RESTORATION_TILE_SIZE, overlap=RESTORATION_TILE_OVERLAP,
         )
     return _pil_to_response(final, filename='pipeline_result.png')
 
 @app.post("/api/pipeline/process-json")
-async def pipeline_process_json(request: Request, file: UploadFile = File(...)):
+async def pipeline_process_json(request: Request, file: UploadFile = File(...), mode: str = Form("full"), adj_brightness: float = Form(1.0), adj_contrast: float = Form(1.0)):
     """Run the production pipeline and return ordered step metadata."""
+    unload_idle_models()
     # require_api_auth(request)  # Public for image loading
-    if doc_restorer_model is None:
+    if get_doc_restorer_model() is None:
         raise HTTPException(status_code=503, detail='DocumentRestorerNet checkpoint not loaded')
     image = _read_image(file)
     start_total = time.time()
     with torch.inference_mode():
         final, _, info = run_document_restoration_pipeline(
-            doc_restorer_model, image, device,
+            get_doc_restorer_model(), image, device,
             tile_size=RESTORATION_TILE_SIZE, overlap=RESTORATION_TILE_OVERLAP,
+            mode=mode,
         )
+    # Optional light post-adjust for web testing (works best with ai_only)
+    if abs(adj_brightness - 1.0) > 0.001:
+        final = ImageEnhance.Brightness(final).enhance(adj_brightness)
+    if abs(adj_contrast - 1.0) > 0.001:
+        final = ImageEnhance.Contrast(final).enhance(adj_contrast)
+
     total_ms = round((time.time() - start_total) * 1000)
     steps = [
         {'name': 'input', 'label': 'Input', 'status': 'done', 'time_ms': 0, 'info': f'Original size: {image.size[0]}x{image.size[1]}'},
@@ -2576,6 +3885,7 @@ async def start_training(request: Request,
                          warmup_epochs: int = Form(3),
                          max_train_samples: int = Form(0),
                          max_val_samples: int = Form(0)):
+    unload_idle_models()
     # require_api_auth(request)  # Public for image loading
     global _training_process, _training_log, _training_started_at, _training_estimated_finish_at, _training_kind
 
@@ -2688,6 +3998,7 @@ async def start_training(request: Request,
 
 @app.post("/api/training/stop")
 async def stop_training(request: Request):
+    unload_idle_models()
     # require_api_auth(request)  # Public for image loading
     global _training_process
     pid = _training_process.pid if _training_process is not None and _training_process.poll() is None else _stored_training_pid()
@@ -2725,6 +4036,7 @@ async def evaluate_training(request: Request,
                             device: str = Form('cuda'),
                             max_samples: int = Form(0),
                             pipeline: bool = Form(True)):
+    unload_idle_models()
     # require_api_auth(request)  # Public for image loading
     global _training_process, _training_log, _training_started_at, _training_estimated_finish_at, _training_kind
 
@@ -2771,6 +4083,7 @@ async def evaluate_training(request: Request,
 
 @app.post("/api/models/export-mobile")
 async def export_mobile_model(request: Request, checkpoint: str = Form(...)):
+    unload_idle_models()
     # require_api_auth(request)  # Public for image loading
     safe_checkpoint = _safe_checkpoint_path(checkpoint)
     checkpoint_path = BASE_DIR / safe_checkpoint
@@ -2793,6 +4106,7 @@ async def export_mobile_model(request: Request, checkpoint: str = Form(...)):
 
 @app.get("/api/training/log")
 async def training_log(request: Request, offset: int = 0):
+    unload_idle_models()
     # require_api_auth(request)  # Public for image loading
     with _training_lock:
         running = _training_is_running()
