@@ -12,7 +12,7 @@
   let newDesc = ""
   let creating = false
   let page = 1
-  let pageSize = 9
+  let pageSize = 20
   let error = null
 
   onMount(loadDatasets)
@@ -141,10 +141,17 @@
             <p class="ds-desc">{ds.description}</p>
           {/if}
           <div class="ds-stats">
-            <span>{ds.paired_count} pair</span>
-            <span>{ds.input_count} input</span>
-            <span>{ds.target_count} target</span>
+            <span>{ds.paired_count} train pair</span>
+            <span>{ds.input_count} train input</span>
+            <span>{ds.target_count} train target</span>
           </div>
+          {#if ds.has_test_split}
+            <div class="ds-stats test-stats">
+              <span>{ds.test_paired_count} test pair</span>
+              <span>{ds.test_input_count} test input</span>
+              <span>{ds.test_target_count} test target</span>
+            </div>
+          {/if}
           <p class="ds-date">{ds.created_at}</p>
         </div>
       {/each}
@@ -183,6 +190,7 @@
   .ds-slug { font-size: 0.8rem; color: var(--accent); font-family: monospace; margin-bottom: 0.5rem; }
   .ds-desc { font-size: 0.82rem; color: var(--text2); margin-bottom: 0.5rem; }
   .ds-stats { display: flex; gap: 1rem; font-size: 0.78rem; color: var(--text2); margin-bottom: 0.3rem; }
+  .test-stats { color: #fbbf24; margin-top: 0.35rem; }
   .ds-date { font-size: 0.72rem; color: var(--text3); }
   .btn-icon { background: none; border: none; color: var(--text2); cursor: pointer; padding: 0.3rem; border-radius: 4px; }
   .btn-icon.danger:hover { color: #ef4444; }

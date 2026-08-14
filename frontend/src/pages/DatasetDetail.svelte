@@ -52,7 +52,48 @@
 function openPreview(pair) { previewPair = pair }
   function closePreview() { previewPair = null }
 
+  let auditModal = null
+
+  async function auditPair(filename) {
+    try {
+      const res = await fetch(`${API}/api/datasets/custom/${slug}/audit/${filename}`, {
+        headers: { Authorization: `Bearer ${localStorage.getItem("token") || ""}` }
+      })
+      auditModal = await res.json()
+    } catch (e) { error = e.message }
+  }
+
+  async function movePair(filename, targetSlug) {
+    // Audit dulu
+    try {
+      const res = await fetch(`${API}/api/datasets/custom/${slug}/audit/${filename}`, {
+        headers: { Authorization: `Bearer ${localStorage.getItem("token") || ""}` }
+      })
+      const audit = await res.json()
+      
+      let msg = `Pindahkan ${filename} ke "${targetSlug}"?`
+      if (audit.reasons && audit.reasons.length > 0) {
+        msg += `\n\nAlasan weak:\n` + audit.reasons.map(r => `• ${r}`).join("\n")
+        msg += `\n\nMetrics:\n• Brightness delta: ${audit.metrics.brightness_diff}\n• White ratio: ${audit.metrics.gt_white_ratio}\n• Pixel diff: ${audit.metrics.pixel_diff}`
+      } else {
+        msg += `\n\n✓ Pair ini valid`
+      }
+      
+      if (!confirm(msg)) return
+      
+      await fetch(`${API}/api/datasets/custom/${slug}/move/${filename}`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${localStorage.getItem("token") || ""}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ target_slug: targetSlug })
+      })
+      await loadDataset()
+    } catch (e) {
+      error = e.message
+    }
+  }
+
   $: sortedPairs = [...(dataset?.pairs || [])].sort((a, b) => (b.updated_at || 0) - (a.updated_at || 0))
+  $: testPairs = dataset?.test_pairs || []
   $: pairTotalPages = Math.max(1, Math.ceil(sortedPairs.length / pairPageSize))
   $: if (pairPage > pairTotalPages) pairPage = pairTotalPages
   $: pagedPairs = sortedPairs.slice((pairPage - 1) * pairPageSize, pairPage * pairPageSize)
@@ -334,18 +375,35 @@ function openPreview(pair) { previewPair = pair }
 
     <!-- Pairs List -->
     <div class="section">
-      <h2>Daftar Pair ({dataset.pairs?.length || 0})</h2>
+      {#if dataset.test_paired_count > 0}
+        <div class="test-section">
+          <h2>Test Pair ({dataset.test_paired_count})</h2>
+          <p class="section-hint">Pair test terpisah. Tidak dipakai training.</p>
+          <div class="pairs-grid">
+            {#each testPairs as pair}
+              <div class="pair-card test-card" onclick={() => openPreview(pair)}>
+                <div class="pair-thumbs">
+                  <div><span class="thumb-label">Input</span><img src={API + '/api/datasets/explorer/image?dataset=' + encodeURIComponent('datasets/paired/custom/' + slug) + '&path=' + encodeURIComponent(pair.input)} alt="test input" class="thumb" loading="lazy" /></div>
+                  <div><span class="thumb-label">GT / Target</span><img src={API + '/api/datasets/explorer/image?dataset=' + encodeURIComponent('datasets/paired/custom/' + slug) + '&path=' + encodeURIComponent(pair.target)} alt="test target" class="thumb" loading="lazy" /></div>
+                </div>
+                <div class="pair-name">{pair.name}</div>
+                <span class="test-badge">TEST</span>
+              </div>
+            {/each}
+          </div>
+        </div>
+      {/if}
+
+      <h2>Train Pair ({dataset.pairs?.length || 0})</h2>
       <p class="section-hint">Urut: terbaru dulu</p>
       {#if !dataset.pairs || dataset.pairs.length === 0}
         <p class="empty-text">Belum ada pair. Upload di atas untuk menambah.</p>
       {:else}
         <div class="pairs-grid">
           {#each pagedPairs as pair}
-            <div class="pair-card" onclick={() => openPreview(pair)}>
-              <button class="btn-icon danger delete-btn" onclick={(e) => { e.stopPropagation(); deletePair(pair.name + '.png') }} title="Hapus">
-                <i data-lucide="trash-2"></i>
-              </button>
-              <div class="pair-thumbs">
+            <div class="pair-card">
+                ↗
+              <div class="pair-thumbs" onclick={() => openPreview(pair)} style="cursor:pointer">
                 <div class="thumb-wrap">
                   <span class="thumb-label">Input</span>
                   <img src={API + '/api/datasets/explorer/image?dataset=' + encodeURIComponent('datasets/paired/custom/' + slug) + '&path=' + encodeURIComponent(pair.input)} alt="input" class="thumb" loading="lazy" />
@@ -360,6 +418,11 @@ function openPreview(pair) { previewPair = pair }
                 {/if}
               </div>
               <span class="pair-name">{pair.name}</span>
+              <div class="pair-actions">
+                <button class="btn-audit" onclick={(e) => { e.stopPropagation(); auditPair(pair.name + ".png") }} title="Validasi">Validasi</button>
+                <button class="btn-move" onclick={(e) => { e.stopPropagation(); const target = slug === "custom_weak" ? "custom" : "custom_weak"; movePair(pair.name + ".png", target) }} title="Pindah">Pindah</button>
+                <button class="btn-del" onclick={(e) => { e.stopPropagation(); deletePair(pair.name + ".png") }} title="Hapus">Hapus</button>
+              </div>
             </div>
           {/each}
         </div>
@@ -370,6 +433,27 @@ function openPreview(pair) { previewPair = pair }
         </div>
       {/if}
     </div>
+      {#if auditModal}
+        <div class="audit-modal" onclick={() => auditModal = null}>
+          <div class="audit-box" onclick={(e) => e.stopPropagation()}>
+            <h3>Validasi: {auditModal.filename}</h3>
+            {#if auditModal.reasons.length === 0}
+              <div class="audit-reason ok">Pair ini valid</div>
+            {:else}
+              {#each auditModal.reasons as r}
+                <div class="audit-reason">{r}</div>
+              {/each}
+            {/if}
+            <div class="audit-metrics">
+              Brightness: {auditModal.metrics.brightness_diff} | White: {auditModal.metrics.gt_white_ratio} | Diff: {auditModal.metrics.pixel_diff}
+            </div>
+            <div class="audit-actions">
+              <button class="btn-move" onclick={() => { const t = slug === "custom_weak" ? "custom" : "custom_weak"; movePair(auditModal.filename, t); auditModal = null }}>Pindah</button>
+              <button class="btn-del" onclick={() => auditModal = null}>Tutup</button>
+            </div>
+          </div>
+        </div>
+      {/if}
   {/if}
 
   {#if previewPair}
@@ -433,6 +517,10 @@ function openPreview(pair) { previewPair = pair }
   .grade-badge { display: inline-flex; padding: 0.15rem 0.5rem; border-radius: 999px; color: white; font-size: 0.72rem; font-weight: 700; margin-right: 0.3rem; }
   .grade-badge.small { padding: 0.1rem 0.4rem; font-size: 0.68rem; }
   .reason-tag { background: rgba(239,68,68,0.1); color: #ef4444; padding: 0.2rem 0.5rem; border-radius: 999px; font-size: 0.72rem; }
+  .test-section { margin: 2rem 0; padding: 1rem; border: 1px solid rgba(234,179,8,.35); border-radius: var(--radius); background: rgba(234,179,8,.04); }
+  .section-hint { color: var(--text2); font-size: .85rem; }
+  .test-card { border-color: rgba(234,179,8,.45); position: relative; }
+  .test-badge { color: #fbbf24; font-size: .7rem; font-weight: 700; }
   .pairs-table { display: flex; flex-direction: column; gap: 0.3rem; }
   .pair-row { display: flex; align-items: center; gap: 1rem; padding: 0.5rem 0.75rem; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-xs); }
   .pair-row.unpaired { opacity: 0.6; }
@@ -458,6 +546,21 @@ function openPreview(pair) { previewPair = pair }
   .thumb-wrap.empty { display: flex; align-items: center; justify-content: center; color: var(--text3); font-size: 0.7rem; }
   .thumb-label { position: absolute; top: 4px; left: 4px; font-size: 0.55rem; font-weight: 700; text-transform: uppercase; color: white; background: rgba(0,0,0,0.6); padding: 0.1rem 0.3rem; border-radius: 3px; z-index: 1; }
   .thumb { width: 100%; height: 100%; object-fit: contain; }
+  .pair-actions { display: flex; gap: 0.5rem; margin-top: 0.5rem; flex-wrap: wrap; }
+  .btn-audit { background: #3b82f6; color: white; border: none; border-radius: 6px; padding: 0.35rem 0.8rem; font-size: 0.78rem; font-weight: 600; cursor: pointer; flex: 1; }
+  .btn-audit:hover { background: #2563eb; }
+  .audit-modal { position: fixed; inset: 0; background: rgba(0,0,0,0.7); display: flex; align-items: center; justify-content: center; z-index: 100; }
+  .audit-box { background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); padding: 1.5rem; max-width: 500px; width: 90%; }
+  .audit-box h3 { margin: 0 0 1rem; font-size: 1rem; }
+  .audit-reason { padding: 0.5rem; background: rgba(239,68,68,0.1); border-radius: 6px; margin-bottom: 0.5rem; font-size: 0.85rem; color: #ef4444; }
+  .audit-reason.ok { background: rgba(34,197,94,0.1); color: #22c55e; }
+  .audit-metrics { font-size: 0.8rem; color: var(--text2); margin-top: 0.5rem; }
+  .audit-actions { margin-top: 1rem; display: flex; gap: 0.5rem; }
+  .btn-move { background: #22c55e; color: white; border: none; border-radius: 6px; padding: 0.35rem 0.8rem; font-size: 0.78rem; font-weight: 600; cursor: pointer; flex: 1; }
+  .btn-move:hover { background: #16a34a; }
+  .btn-del { background: #ef4444; color: white; border: none; border-radius: 6px; padding: 0.35rem 0.8rem; font-size: 0.78rem; font-weight: 600; cursor: pointer; flex: 1; }
+  .btn-del:hover { background: #dc2626; }
+  .move-btn:hover { background: rgba(34,197,94,0.85) !important; }
   .delete-btn { position: absolute; top: 6px; right: 6px; z-index: 2; background: rgba(0,0,0,0.5) !important; border-radius: 50% !important; width: 28px !important; height: 28px !important; min-height: 28px !important; }
   .delete-btn:hover { background: rgba(239,68,68,0.85) !important; }
   .lightbox { position: fixed; inset: 0; background: rgba(0,0,0,0.8); z-index: 1000; display: flex; align-items: center; justify-content: center; padding: 2rem; }

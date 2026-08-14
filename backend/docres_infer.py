@@ -89,12 +89,16 @@ def run_task(img_bgr, task):
             in_im, pad_h, pad_w = stride_integral(in_im, 8)
         else:
             in_im = cv2.resize(in_im, (MAX_SIZE, MAX_SIZE))
-        in_im = torch.from_numpy((in_im / 255.0).transpose(2,0,1)).unsqueeze(0).half().to(device)
-        model_h = model.half()
+        in_im = torch.from_numpy((in_im / 255.0).transpose(2,0,1)).unsqueeze(0).float().to(device)
+        model_f = model.float()
         with torch.no_grad():
-            pred = model_h(in_im)
+            pred = model_f(in_im)
             pred = torch.clamp(pred, 0, 1)[0].permute(1,2,0).cpu().numpy()
             pred = (pred * 255).astype(np.uint8)
+            del in_im
+            import gc; gc.collect()
+            try: torch.cuda.empty_cache()
+            except: pass
             if max(orig_w, orig_h) < MAX_SIZE:
                 result = pred[pad_h:, pad_w:]
             else:
@@ -112,12 +116,16 @@ def run_task(img_bgr, task):
             in_im, pad_h, pad_w = stride_integral(in_im, 8)
         else:
             in_im = cv2.resize(in_im, (MAX_SIZE, MAX_SIZE))
-        in_im = torch.from_numpy((in_im / 255.0).transpose(2,0,1)).unsqueeze(0).half().to(device)
-        model_h = model.half()
+        in_im = torch.from_numpy((in_im / 255.0).transpose(2,0,1)).unsqueeze(0).float().to(device)
+        model_f = model.float()
         with torch.no_grad():
-            pred = model_h(in_im)
+            pred = model_f(in_im)
             pred = torch.clamp(pred, 0, 1)[0].permute(1,2,0).cpu().numpy()
             pred = (pred * 255).astype(np.uint8)
+            del in_im
+            import gc; gc.collect()
+            try: torch.cuda.empty_cache()
+            except: pass
             if max(orig_w, orig_h) < MAX_SIZE:
                 result = pred[pad_h:, pad_w:]
             else:
@@ -131,12 +139,16 @@ def run_task(img_bgr, task):
         in_im, pad_h, pad_w = stride_integral(img_bgr, 8)
         prompt = deblur_prompt_func(in_im)
         in_im = np.concatenate([in_im, prompt], axis=-1)
-        in_im = torch.from_numpy((in_im / 255.0).transpose(2,0,1)).unsqueeze(0).half().to(device)
-        model_h = model.half()
+        in_im = torch.from_numpy((in_im / 255.0).transpose(2,0,1)).unsqueeze(0).float().to(device)
+        model_f = model.float()
         with torch.no_grad():
-            pred = model_h(in_im)
+            pred = model_f(in_im)
             pred = torch.clamp(pred, 0, 1)[0].permute(1,2,0).cpu().numpy()
             pred = (pred * 255).astype(np.uint8)
+            del in_im
+            import gc; gc.collect()
+            try: torch.cuda.empty_cache()
+            except: pass
             result = pred[pad_h:, pad_w:]
     
     elif task == "end2end":

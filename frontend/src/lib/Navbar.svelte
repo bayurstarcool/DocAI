@@ -26,6 +26,7 @@
     { href: '/datasets', icon: 'database', label: 'Datasets', admin: true },
     { href: '/dataset-manager', icon: 'settings-2', label: 'Dataset Manager', admin: true },
     { href: '/synthetic-shadow', icon: 'sun-dim', label: 'Shadow Gen', admin: true },
+    { href: '/synthetic-dewarp', icon: 'waves', label: 'Dewarp Gen', admin: true },
     { href: '/magang', icon: 'graduation-cap', label: 'Magang' },
     { href: '/magang-review', icon: 'clipboard-check', label: 'Review', admin: true },
   ]

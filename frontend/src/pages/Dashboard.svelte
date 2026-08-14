@@ -7,6 +7,7 @@
   let stats = { device: '...', restorer: '-', shadow: '-', enhancer: '-' }
   let selectedFile = null
   let selectedMode = 'restore'
+  let docresTask = 'deshadowing'
   let resultBlob = null
   let resultUrl = ''
   let originalUrl = ''
@@ -17,6 +18,9 @@
   let trainedRuns = []
   let liveCheckpoints = []
   let selectedCheckpoint = 'checkpoints/document_restorer/best.pth'
+  let pipelineMode = 'ai_only'
+  let adjBrightness = 0.97
+  let adjContrast = 1.08
   let checkpointTimer = null
 
   const checkpointModes = new Set(['restore', 'full_pipeline'])
@@ -51,6 +55,7 @@
 
   const modes = [
     { id: 'docres', icon: 'sparkles', label: 'AI DocRes' },
+    { id: 'docres576', icon: 'sparkles', label: 'DocRes 576 Best' },
     { id: 'restore', icon: 'wand-2', label: 'AI Restore' },
     { id: 'shadow_remove', icon: 'sun-dim', label: 'Shadow Remove' },
     { id: 'shadow_effective_bg', icon: 'sun', label: 'Shadow BG Est.' },
@@ -112,6 +117,10 @@
     if (selectedMode === 'detect_text') {
       const fd = new FormData()
       fd.append('file', selectedFile)
+      fd.append('mode', pipelineMode)
+      fd.append('adj_brightness', String(adjBrightness))
+      fd.append('adj_contrast', String(adjContrast))
+      fd.append('task', docresTask)
       const start = performance.now()
       try {
         const token = localStorage.getItem('docai_token')
@@ -128,6 +137,30 @@
         r2.readAsDataURL(selectedFile)
         const ms = Math.round(performance.now() - start)
         showToast(`Teks terdeteksi: ${data.word_count || 0} kata dalam ${ms}ms`)
+      } catch(e) { showToast(e.message, 'error') }
+      finally { processing = false }
+      return
+    }
+
+    if (selectedMode === 'docres576') {
+      const fd = new FormData()
+      fd.append('file', selectedFile)
+      fd.append('adj_brightness', String(adjBrightness))
+      fd.append('adj_contrast', String(adjContrast))
+      fd.append('task', docresTask)
+      const start = performance.now()
+      try {
+        const token = localStorage.getItem('docai_token')
+        const res = await fetch('/api/docres576/process-json', { method: 'POST', headers: { Authorization: `Bearer ${token}` }, body: fd })
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}))
+          throw new Error(err.detail || `DocRes 576 error ${res.status}`)
+        }
+        const data = await res.json()
+        pipelineResult = data
+        resultUrl = data.image
+        resultBlob = null
+        showToast(`DocRes 576 selesai: ${data.total_ms}ms`)
       } catch(e) { showToast(e.message, 'error') }
       finally { processing = false }
       return
@@ -219,6 +252,33 @@
       {/each}
     </div>
   </div>
+
+  {#if selectedMode === 'docres576'}
+    <div class="model-select" style="margin-top:1rem">
+      <label for="docresTask">Task</label>
+      <select id="docresTask" bind:value={docresTask}>
+        <option value="deshadowing">Deshadowing</option>
+        <option value="appearance">Appearance</option>
+        <option value="deblurring">Deblurring</option>
+      </select>
+    </div>
+  {/if}
+
+  {#if selectedMode === 'full_pipeline' || selectedMode === 'docres576'}
+    <div class="model-select" style="margin-top:1rem">
+      <label for="pipelineMode">Pipeline mode</label>
+      <select id="pipelineMode" bind:value={pipelineMode}>
+        <option value="ai_only">AI Only (recommended)</option>
+        <option value="ai_tone_match">AI Tone Match</option>
+        <option value="ai_preserve">AI Preserve</option>
+        <option value="full">Full Pipeline</option>
+      </select>
+      <label for="adjBrightness">Brightness: {adjBrightness.toFixed(2)}</label>
+      <input id="adjBrightness" type="range" min="0.85" max="1.15" step="0.01" bind:value={adjBrightness} />
+      <label for="adjContrast">Contrast: {adjContrast.toFixed(2)}</label>
+      <input id="adjContrast" type="range" min="0.85" max="1.25" step="0.01" bind:value={adjContrast} />
+    </div>
+  {/if}
 
   {#if checkpointModes.has(selectedMode)}
     <div class="model-select" style="margin-top:1rem">

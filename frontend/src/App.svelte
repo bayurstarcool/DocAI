@@ -13,6 +13,7 @@
   import DatasetDetail from './pages/DatasetDetail.svelte'
   import DocResTraining from './pages/DocResTraining.svelte'
   import SyntheticShadow from './pages/SyntheticShadow.svelte'
+  import SyntheticDewarp from './pages/SyntheticDewarp.svelte'
 import Magang from './pages/Magang.svelte'
 import MagangReview from './pages/MagangReview.svelte'
 
@@ -43,6 +44,8 @@ import MagangReview from './pages/MagangReview.svelte'
     <DatasetDetail />
   {:else if $currentRoute === '/synthetic-shadow'}
     <SyntheticShadow />
+  {:else if $currentRoute === '/synthetic-dewarp'}
+    <SyntheticDewarp />
   {:else if $currentRoute === '/magang'}
     <Magang />
   {:else if $currentRoute === '/magang-review'}

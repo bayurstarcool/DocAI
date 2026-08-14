@@ -65,26 +65,38 @@
     if (!selectedSlug) return
     singleLoading = true
     try {
-      const d = await apiJson("/api/datasets/custom/" + encodeURIComponent(selectedSlug))
-      singleDataset = d
+      const ds = datasets.find(d => d.path && d.path.includes(selectedSlug)) || {}
+      const dsPath = ds.path || "datasets/paired/" + selectedSlug
+      const hasSplit = !!ds.has_train_test
+      const browseFolder = (folder) => hasSplit ? (folder === "all" ? folder : "train/" + folder) : folder
 
-      // Build image list based on selected folder
       let images = []
-      if (d.pairs) {
-        for (const p of d.pairs) {
-          if (selectedFolder === "input" && p.input) {
-            images.push({ name: p.name, path: p.input, folder: "input" })
-          } else if (selectedFolder === "target" && p.target) {
-            images.push({ name: p.name, path: p.target, folder: "target" })
-          } else if (selectedFolder === "all") {
-            if (p.input) images.push({ name: p.name + " (input)", path: p.input, folder: "input" })
-            if (p.target) images.push({ name: p.name + " (target)", path: p.target, folder: "target" })
-          }
+      let totalCount = 0
+      const offset = (detailPage - 1) * detailPageSize
+
+      if (selectedFolder === "all") {
+        for (const folder of ["input", "target"]) {
+          try {
+            const res = await apiJson("/api/datasets/explorer?dataset=" + encodeURIComponent(dsPath) + "&path=" + browseFolder(folder) + "&offset=0&limit=" + detailPageSize)
+            const entries = res.entries || []
+            images = images.concat(entries.filter(e => e.kind === "image").map(e => ({
+              name: e.name, path: e.path, folder: folder
+            })))
+            totalCount += res.total || 0
+          } catch (e) {}
         }
+      } else {
+        const res = await apiJson("/api/datasets/explorer?dataset=" + encodeURIComponent(dsPath) + "&path=" + browseFolder(selectedFolder) + "&offset=" + offset + "&limit=" + detailPageSize)
+        totalCount = res.total || 0
+        const entries = res.entries || []
+        images = entries.filter(e => e.kind === "image").map(e => ({
+          name: e.name, path: e.path, folder: selectedFolder
+        }))
       }
-      detailTotal = images.length
-      const start = (detailPage - 1) * detailPageSize
-      singleImages = images.slice(start, start + detailPageSize)
+
+      detailTotal = totalCount || images.length
+      singleImages = images
+      singleDataset = { name: selectedSlug, path: dsPath, paired_count: totalCount }
     } catch (e) {
       showToast("Gagal memuat detail: " + e.message, "error")
     } finally {
@@ -147,9 +159,13 @@
   }
 
   function imgURL(entry) {
-    const slug = singleDataset?.slug || selectedSlug || "custom"
-    const dsPath = "datasets/paired/custom/" + slug
+    const dsPath = singleDataset?.path || "datasets/paired/" + (selectedSlug || "custom")
     return `${API}/api/datasets/explorer/image?dataset=${encodeURIComponent(dsPath)}&path=${encodeURIComponent(entry.path)}&size=200`
+  }
+
+  function fullImgURL(entry) {
+    const dsPath = singleDataset?.path || "datasets/paired/" + (selectedSlug || "custom")
+    return `${API}/api/datasets/explorer/image?dataset=${encodeURIComponent(dsPath)}&path=${encodeURIComponent(entry.path)}`
   }
 
   function switchFolder(folder) {
@@ -164,8 +180,8 @@
     <!-- LIST VIEW -->
     <div class="page-header">
       <div>
-        <h1>Dataset Browser</h1>
-        <p class="subtitle">Jelajahi dataset yang tersedia.</p>
+        <h1>Dataset Manager</h1>
+        <p class="subtitle">Kelola, audit, dan preview semua dataset training.</p>
       </div>
       <button class="btn-refresh" onclick={loadDatasets}>
         <i data-lucide="refresh-cw"></i> Refresh
@@ -195,7 +211,7 @@
         {#each filteredItems as ds}
           <div class="ds-card" class:paired={ds.kind === "paired"} onclick={() => navigate("/datasets/" + encodeURIComponent(ds.name))}>
             <div class="ds-card-header">
-              <span class="ds-badge" class:paired={ds.kind === "paired"}>{ds.kind}</span>
+              <span class="ds-status" class:ready={ds.ready}>{ds.ready ? "ready" : "not ready"}</span>
             </div>
             <h3 class="ds-name">{ds.name}</h3>
             <div class="ds-stats">
@@ -207,7 +223,7 @@
             <div class="ds-progress">
               <div class="progress-fill" style="width: {ds.ready ? 100 : 0}%"></div>
             </div>
-            <span class="ds-status" class:ready={ds.ready}>Ready: {ds.ready ? "Yes" : "No"}</span>
+            <span class="ds-status" class:ready={ds.ready}>{ds.ready ? "Ready" : "Needs audit"}</span>
             <span class="ds-path">{ds.source || ds.path}</span>
           </div>
         {/each}
@@ -218,7 +234,7 @@
   {:else}
     <!-- DETAIL VIEW -->
     <a class="back-link" href="/datasets" onclick={(e) => { e.preventDefault(); goBack() }}>
-      <i data-lucide="arrow-left"></i> Kembali ke Datasets
+      <i data-lucide="arrow-left"></i> Kembali ke Dataset Manager
     </a>
 
     {#if singleLoading}
@@ -292,6 +308,7 @@
     {/if}
     <div class="lb-content" onclick={(e) => e.stopPropagation()}>
       <img src={imgURL(singleImages[lbIdx])} alt={singleImages[lbIdx]?.name} class="lb-img" />
+      <a class="lb-full-btn" href={fullImgURL(singleImages[lbIdx])} target="_blank" rel="noreferrer" onclick={(e) => e.stopPropagation()}>Preview Full Resolution ↗</a>
       <div class="lb-info">
         <span>{singleImages[lbIdx]?.name}</span>
         <span class="lb-counter">
@@ -316,10 +333,10 @@
   .search-box { display: flex; align-items: center; gap: 0.5rem; padding: 0.4rem 0.75rem; background: var(--bg2); border: 1px solid var(--border); border-radius: 6px; }
   .search-box input { border: none; background: transparent; color: var(--text); font-size: 0.85rem; outline: none; min-width: 150px; }
   .ds-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 0.75rem; }
-  .ds-card { background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); padding: 1rem; cursor: pointer; transition: border-color 0.15s; }
-  .ds-card:hover { border-color: var(--accent); }
+  .ds-card { background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); padding: 1.25rem; cursor: pointer; transition: border-color 0.15s; }
+  .ds-card:hover { border-color: var(--accent); transform: translateY(-1px); }
   .ds-card-header { display: flex; justify-content: space-between; margin-bottom: 0.4rem; }
-  .ds-badge { font-size: 0.65rem; font-weight: 700; text-transform: uppercase; padding: 0.15rem 0.5rem; border-radius: 999px; background: rgba(255, 255, 255, 0.05); color: var(--text2); }
+  .ds-badge { display:none; font-size: 0.65rem; font-weight: 700; text-transform: uppercase; padding: 0.15rem 0.5rem; border-radius: 999px; background: rgba(255, 255, 255, 0.05); color: var(--text2); }
   .ds-badge.paired { background: rgba(99, 102, 241, 0.15); color: #818cf8; }
   .ds-name { font-size: 1rem; margin-bottom: 0.3rem; }
   .ds-stats { display: flex; gap: 0.75rem; font-size: 0.78rem; color: var(--text2); margin-bottom: 0.4rem; }
@@ -365,6 +382,8 @@
   .lb-prev { left: 1rem; }
   .lb-next { right: 1rem; }
   .lb-prev:hover, .lb-next:hover { background: rgba(0, 0, 0, 0.8); }
+  .lb-full-btn { display: inline-block; margin-top: 0.5rem; color: #67e8f9; font-size: 0.8rem; text-decoration: none; }
+  .lb-full-btn:hover { text-decoration: underline; }
   .lb-info { display: flex; justify-content: space-between; align-items: center; color: var(--text2); font-size: 0.85rem; margin-top: 0.5rem; }
   .lb-counter { color: var(--text3); }
 </style>

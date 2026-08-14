@@ -424,6 +424,11 @@ def list_datasets() -> List[Dict]:
         input_count = len([f for f in os.listdir(input_dir) if f.lower().endswith(image_exts)]) if os.path.exists(input_dir) else 0
         target_count = len([f for f in os.listdir(target_dir) if f.lower().endswith(image_exts)]) if os.path.exists(target_dir) else 0
 
+        test_input_dir = os.path.join(ds_path, 'test', 'input')
+        test_target_dir = os.path.join(ds_path, 'test', 'target')
+        test_input_count = len([f for f in os.listdir(test_input_dir) if f.lower().endswith(image_exts)]) if os.path.exists(test_input_dir) else 0
+        test_target_count = len([f for f in os.listdir(test_target_dir) if f.lower().endswith(image_exts)]) if os.path.exists(test_target_dir) else 0
+
         datasets.append({
             "slug": slug,
             "name": meta.get("name", slug),
@@ -431,6 +436,10 @@ def list_datasets() -> List[Dict]:
             "input_count": input_count,
             "target_count": target_count,
             "paired_count": min(input_count, target_count),
+            "test_input_count": test_input_count,
+            "test_target_count": test_target_count,
+            "test_paired_count": min(test_input_count, test_target_count),
+            "has_test_split": test_input_count > 0 or test_target_count > 0,
             "created_at": meta.get("created_at", ""),
             "updated_at": os.path.getmtime(ds_path),
             "target_size": meta.get("target_size", "1024,1024"),
@@ -476,6 +485,12 @@ def get_dataset(slug: str) -> Optional[Dict]:
             "updated_at": updated_at,
         })
 
+    test_input_dir = os.path.join(ds_path, "test", "input")
+    test_target_dir = os.path.join(ds_path, "test", "target")
+    test_inputs = [f for f in os.listdir(test_input_dir) if f.lower().endswith(image_exts)] if os.path.exists(test_input_dir) else []
+    test_targets = {Path(f).stem: f for f in os.listdir(test_target_dir) if f.lower().endswith(image_exts)} if os.path.exists(test_target_dir) else {}
+    test_pairs = [{"name": Path(f).stem, "input": f"test/input/{f}", "target": f"test/target/{test_targets.get(Path(f).stem)}", "paired": Path(f).stem in test_targets} for f in sorted(test_inputs)]
+
     return {
         "slug": slug,
         "name": meta.get("name", slug),
@@ -485,7 +500,14 @@ def get_dataset(slug: str) -> Optional[Dict]:
         "input_count": len(input_files),
         "target_count": len(target_files),
         "paired_count": sum(1 for p in pairs if p["paired"]),
+        "test_input_count": len([f for f in os.listdir(os.path.join(ds_path, 'test', 'input')) if f.lower().endswith(image_exts)]) if os.path.exists(os.path.join(ds_path, 'test', 'input')) else 0,
+        "test_target_count": len([f for f in os.listdir(os.path.join(ds_path, 'test', 'target')) if f.lower().endswith(image_exts)]) if os.path.exists(os.path.join(ds_path, 'test', 'target')) else 0,
+        "test_paired_count": len([f for f in os.listdir(os.path.join(ds_path, 'test', 'input')) if f.lower().endswith(image_exts)]) if os.path.exists(os.path.join(ds_path, 'test', 'input')) else 0,
         "pairs": pairs,
+        "test_pairs": test_pairs,
+        "test_input_count": len(test_inputs),
+        "test_target_count": len(test_targets),
+        "test_paired_count": sum(1 for x in test_pairs if x["paired"]),
     }
 
 

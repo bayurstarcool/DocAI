@@ -51,12 +51,14 @@
         <div class="status-item"><span>LOSS (L1)</span><strong>{status.loss ?? '-'}</strong></div>
         <div class="status-item"><span>BEST SCORE</span><strong>{status.best_score ?? 'none yet'}</strong></div>
         <div class="status-item"><span>SPEED</span><strong>{status.speed_it_per_sec ?? '-'} it/s</strong></div>
-        <div class="status-item"><span>ETA</span><strong>{etaH}h {etaM}m</strong></div>
+        <div class="status-item"><span>ETA</span><strong>{etaH}j {etaM}m</strong></div>
+        <div class="status-item"><span>SELESAI</span><strong>{status.finish_at_wib ?? '-'}</strong></div>
+        <div class="status-item"><span>MULAI</span><strong>{status.started_at_wib ?? '-'}</strong></div>
         <div class="status-item"><span>LR</span><strong>{status.lr ?? '-'}</strong></div>
       </div>
       <div class="progress-bar"><div class="progress-fill" style="width: {progress}%"></div></div>
     {:else if status.status === "done"}
-      <div class="done-banner"><span>Training selesai!</span><strong>Best: {status.best_score}</strong></div>
+      <div class="done-banner"><span>Training selesai!</span><strong>Best: {status.best_score?.toFixed(6) ?? '-'}</strong></div>
     {:else}
       <p class="idle-text">Tidak ada training aktif.</p>
     {/if}
@@ -132,12 +134,12 @@
     <div class="cfg-grid">
       <div><span>Loss</span><strong>L1 only</strong></div>
       <div><span>Optimizer</span><strong>AdamW (wd=5e-4)</strong></div>
-      <div><span>LR</span><strong>1e-4 to 1e-6 cosine</strong></div>
+      <div><span>LR</span><strong>{status.config?.lr ?? '-'}</strong></div>
       <div><span>Sampling</span><strong>WeightedRandomSampler</strong></div>
       <div><span>Augment</span><strong>rotate +/-180, scale 0.7-1.5</strong></div>
-      <div><span>Im size</span><strong>512x512</strong></div>
-      <div><span>Train scope</span><strong>Decoder only (16%)</strong></div>
-      <div><span>Iters</span><strong>50,000</strong></div>
+      <div><span>Im size</span><strong>{status.config?.im_size ?? '-'}x{status.config?.im_size ?? '-'}</strong></div>
+      <div><span>Train scope</span><strong>{status.config?.train_scope ?? '-'}</strong></div>
+      <div><span>Iters</span><strong>{(status.config?.total_iter ?? status.total_iter ?? '-').toLocaleString()}</strong></div>
     </div>
   </div>
 </div>

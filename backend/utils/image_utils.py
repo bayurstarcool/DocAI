@@ -98,32 +98,29 @@ def _estimate_illumination_map(image_rgb: np.ndarray, shadow_matte: np.ndarray) 
     kernel = max(31, int(min(image_rgb.shape[:2]) * 0.09) | 1)
     illumination = cv2.GaussianBlur(luma, (kernel, kernel), 0)
     shadow_darkening = cv2.GaussianBlur(shadow_matte, (0, 0), max(3, kernel / 8))
-    return np.clip(illumination * (1.0 - shadow_darkening * 0.50), 0.08, 1.0)
+    return np.clip(illumination * (1.0 - shadow_darkening * 0.20), 0.08, 1.0)
 
 def _apply_shadow_correction(original_rgb: np.ndarray, ai_rgb: np.ndarray, shadow_matte: np.ndarray,
                              illumination_map: np.ndarray, strength: float = 1.0) -> np.ndarray:
-    """Apply shadow correction blending AI and traditional methods.
+    """Apply shadow correction: replace dark pixels with AI-brightened versions.
     
-    strength: 0.0 = no correction (original), 1.0 = full correction (default)
+    Rule: original luma < 80 AND AI brightens by > 5 units -> use AI.
+    Everything else stays original. Guarantees non-shadow areas unchanged.
     """
     original = original_rgb.astype(np.float32) / 255.0
     ai = ai_rgb.astype(np.float32) / 255.0
-    target_illumination = max(np.percentile(illumination_map, 90), 0.88)
-    gain = np.clip(target_illumination / np.maximum(illumination_map, 0.08), 1.0, 2.5)
-    traditional = np.clip(original * gain[..., None], 0, 1)
-    matte = np.clip(shadow_matte[..., None], 0, 1)
-    # Blend AI and traditional in shadow areas
-    corrected_shadow = ai * 0.85 + traditional * 0.15
-    # Apply strength: blend between original and corrected
-    corrected = original * (1 - matte) + (original * (1 - strength) + corrected_shadow * strength) * matte
-    # Edge-aware blending: smooth transition at shadow boundary to avoid halos
-    # NOTE: cv2.GaussianBlur squeezes the (H,W,1) channel dim back to (H,W);
-    # re-expand before using in broadcast with (H,W,3) arrays.
-    matte_blur = cv2.GaussianBlur(matte.astype(np.float32), (21, 21), 7)
-    if matte_blur.ndim == 2:
-        matte_blur = matte_blur[..., None]
-    matte_blur = np.clip(matte_blur, 0, 1)
-    corrected = original * (1 - matte_blur) + corrected * matte_blur
+    
+    orig_luma = 0.299 * original[:,:,0] + 0.587 * original[:,:,1] + 0.114 * original[:,:,2]
+    ai_luma = 0.299 * ai[:,:,0] + 0.587 * ai[:,:,1] + 0.114 * ai[:,:,2]
+    
+    # Dark pixel that AI brightens
+    is_dark = orig_luma < (80.0 / 255.0)
+    ai_brightens = (ai_luma - orig_luma) > (5.0 / 255.0)
+    mask = (is_dark & ai_brightens).astype(np.float32)
+    mask = cv2.GaussianBlur(mask, (11, 11), 3)
+    mask = np.clip(mask * strength, 0, 1)[..., None]
+    
+    corrected = original * (1 - mask) + ai * mask
     return (np.clip(corrected, 0, 1) * 255).astype(np.uint8)
 
 def _white_balance_gray_world(image_rgb: np.ndarray) -> np.ndarray:
@@ -136,37 +133,8 @@ def _white_balance_gray_world(image_rgb: np.ndarray) -> np.ndarray:
     return np.clip(image * gains * brightness_boost, 0, 255).astype(np.uint8)
 
 def _uniform_lighting(image_rgb: np.ndarray) -> np.ndarray:
-    """Gentle lighting normalization - uniform luminance without over-whitening."""
-    img = image_rgb.astype(np.float32) / 255.0
-    
-    # Convert to LAB for luminance-only adjustment
-    lab = cv2.cvtColor(img, cv2.COLOR_RGB2LAB)
-    L = lab[:, :, 0]
-    
-    # Estimate illumination gradient (low-frequency)
-    blur_size = max(L.shape) // 8
-    if blur_size % 2 == 0:
-        blur_size += 1
-    illumination = cv2.GaussianBlur(L, (blur_size, blur_size), 0)
-    
-    # Target: median luminance (robust to outliers)
-    target_L = np.median(L)
-    
-    # Gentle correction: don't force to target, just reduce gradient
-    # correction_strength: 0.4 = moderate, keeps natural feel
-    correction_strength = 0.4
-    
-    # Compute correction ratio
-    ratio = target_L / (illumination + 1e-6)
-    ratio = np.clip(ratio, 0.7, 1.4)  # Limit correction range
-    
-    # Apply gentle correction
-    correction = 1.0 + correction_strength * (ratio - 1.0)
-    lab[:, :, 0] = np.clip(L * correction, 0, 100)
-    
-    result = cv2.cvtColor(lab, cv2.COLOR_LAB2RGB)
-    return np.clip(result * 255.0, 0, 255).astype(np.uint8)
-
+    """Passthrough - preserve original brightness. Shadow correction already handles blending."""
+    return image_rgb.copy()
 
 def _local_contrast_enhancement(image_rgb: np.ndarray) -> np.ndarray:
     lab = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2LAB)
@@ -191,6 +159,90 @@ def _text_sharpening(image_rgb: np.ndarray, strength: float = 0.3) -> np.ndarray
     # Add back scaled detail
     sharpened = image_rgb.astype(np.float32) + detail * strength
     return np.clip(sharpened, 0, 255).astype(np.uint8)
+
+def _ai_color_preserve(original_rgb: np.ndarray, ai_rgb: np.ndarray, mask_image: Image.Image | None = None) -> np.ndarray:
+    """Preserve original colors in non-shadow area while using AI luminance in shadow area.
+
+    Goal: keep AI shadow removal/detail, avoid global color shift.
+    """
+    orig = original_rgb.astype(np.uint8)
+    ai = ai_rgb.astype(np.uint8)
+
+    orig_lab = cv2.cvtColor(orig, cv2.COLOR_RGB2LAB)
+    ai_lab = cv2.cvtColor(ai, cv2.COLOR_RGB2LAB)
+
+    orig_l = orig_lab[:, :, 0].astype(np.float32)
+    ai_l = ai_lab[:, :, 0].astype(np.float32)
+
+    # Shadow mask from model if available; otherwise infer from dark original + AI brightening.
+    if mask_image is not None:
+        matte = np.asarray(mask_image.convert('L'), dtype=np.float32) / 255.0
+    else:
+        matte = np.zeros_like(orig_l, dtype=np.float32)
+
+    brightening = np.clip((ai_l - orig_l) / 55.0, 0, 1)
+    dark = np.clip((145.0 - orig_l) / 95.0, 0, 1)
+    inferred = brightening * dark
+
+    # Use max of model matte and inferred shadow, but suppress bright non-shadow.
+    shadow = np.maximum(matte * dark, inferred)
+    shadow = np.where(shadow > 0.08, shadow, 0.0)
+    shadow = cv2.GaussianBlur(shadow.astype(np.float32), (21, 21), 7)
+    shadow = np.clip(shadow, 0, 1)
+
+    # L channel: AI only in shadow, original elsewhere.
+    out_l = orig_l * (1 - shadow) + ai_l * shadow
+
+    # AB color: mostly original to prevent color shift; slight AI color only in deep shadow.
+    out_lab = orig_lab.copy().astype(np.float32)
+    out_lab[:, :, 0] = out_l
+    deep = (shadow ** 1.8)[..., None] * 0.15
+    out_lab[:, :, 1:3] = orig_lab[:, :, 1:3].astype(np.float32) * (1 - deep) + ai_lab[:, :, 1:3].astype(np.float32) * deep
+
+    out = cv2.cvtColor(np.clip(out_lab, 0, 255).astype(np.uint8), cv2.COLOR_LAB2RGB)
+    return out
+
+def _ai_tone_match(original_rgb: np.ndarray, ai_rgb: np.ndarray) -> np.ndarray:
+    """AI Only + tone match to original using bright non-shadow pixels.
+
+    Keeps AI shadow removal/detail, corrects global color/brightness shift.
+    """
+    orig = original_rgb.astype(np.float32)
+    ai = ai_rgb.astype(np.float32)
+
+    # Non-shadow reference: bright, low-saturation-ish paper/background area.
+    orig_lab = cv2.cvtColor(np.clip(orig,0,255).astype(np.uint8), cv2.COLOR_RGB2LAB)
+    L = orig_lab[:, :, 0].astype(np.float32)
+    # Use top 35% luminance as non-shadow reference, ignore extreme highlights.
+    lo = np.percentile(L, 65)
+    hi = np.percentile(L, 98)
+    ref = (L >= lo) & (L <= hi)
+    if ref.mean() < 0.05:
+        ref = L >= np.percentile(L, 70)
+
+    out = ai.copy()
+    # Per-channel affine match on reference pixels.
+    for c in range(3):
+        o = orig[:, :, c][ref]
+        a = ai[:, :, c][ref]
+        if len(o) < 100:
+            continue
+        o_mean, o_std = float(o.mean()), float(o.std() + 1e-6)
+        a_mean, a_std = float(a.mean()), float(a.std() + 1e-6)
+        matched = (out[:, :, c] - a_mean) * (o_std / a_std) + o_mean
+        # Blend correction: 85% tone match, 15% original AI color.
+        out[:, :, c] = out[:, :, c] * 0.15 + matched * 0.85
+
+    # Preserve dark-shadow AI strength: don't over-darken pixels AI strongly brightened.
+    orig_l = 0.299*orig[:,:,0] + 0.587*orig[:,:,1] + 0.114*orig[:,:,2]
+    ai_l = 0.299*ai[:,:,0] + 0.587*ai[:,:,1] + 0.114*ai[:,:,2]
+    out_l = 0.299*out[:,:,0] + 0.587*out[:,:,1] + 0.114*out[:,:,2]
+    shadow = np.clip((120 - orig_l) / 80, 0, 1) * np.clip((ai_l - orig_l) / 60, 0, 1)
+    shadow = cv2.GaussianBlur(shadow.astype(np.float32), (17,17), 5)[...,None]
+    # In shadow, mix back AI to keep removal strong.
+    out = out * (1 - shadow*0.45) + ai * (shadow*0.45)
+
+    return np.clip(out, 0, 255).astype(np.uint8)
 
 def _paper_whitening(image_rgb: np.ndarray) -> np.ndarray:
     image = image_rgb.astype(np.float32)
@@ -239,6 +291,34 @@ def run_document_restoration_pipeline(
         result = Image.fromarray(ai_uniform)
         info = {
             'pipeline': ['input', 'ai_model', 'uniform_lighting', 'text_sharpening', 'ai_only_output'],
+            'segmented_size': segmented.size,
+            'mask_mean': float(np.asarray(mask_image).mean()) if mask_image else 0,
+            'illumination_mean': float(np.mean(np.asarray(result.convert("L")))) / 255.0,
+        }
+        return result, mask_image, info
+
+    if mode == "ai_tone_match":
+        ai_arr = np.asarray(ai_corrected.convert("RGB"))
+        orig_arr = np.asarray(segmented.convert("RGB"))
+        matched = _ai_tone_match(orig_arr, ai_arr)
+        matched = _text_sharpening(matched, strength=0.2)
+        result = Image.fromarray(matched)
+        info = {
+            'pipeline': ['input', 'ai_model', 'tone_match_non_shadow', 'shadow_ai_mix', 'text_sharpening'],
+            'segmented_size': segmented.size,
+            'mask_mean': float(np.asarray(mask_image).mean()) if mask_image else 0,
+            'illumination_mean': float(np.mean(np.asarray(result.convert("L")))) / 255.0,
+        }
+        return result, mask_image, info
+
+    if mode == "ai_preserve":
+        ai_arr = np.asarray(ai_corrected.convert("RGB"))
+        orig_arr = np.asarray(segmented.convert("RGB"))
+        preserved = _ai_color_preserve(orig_arr, ai_arr, mask_image)
+        preserved = _text_sharpening(preserved, strength=0.25)
+        result = Image.fromarray(preserved)
+        info = {
+            'pipeline': ['input', 'ai_model', 'color_preserve_lab', 'shadow_mask_blend', 'text_sharpening'],
             'segmented_size': segmented.size,
             'mask_mean': float(np.asarray(mask_image).mean()) if mask_image else 0,
             'illumination_mean': float(np.mean(np.asarray(result.convert("L")))) / 255.0,
