@@ -47,7 +47,7 @@
   let warpAnimating = false
   let warpProgress = 0
 
-  const modes = ["restore","docres_base","docres_finetune","docres_onnx","docres_dewarping","docres_appearance","docres_appearance_mixed","docres_appearance_mixed_v5","docres_appearance_mixed_v5_lift12","docres_appearance_mixed_v5_tiled_lift12","docres_deblurring","docres_end2end","dewarpnet","opencv_dewarp","controlpoints_dewarp","geotr_doc3d_dewarp","geotr_doc3d_docres","sam_geotr_docres","sam_perspective_appearance","textline_refine_dewarp","auto_dewarp","magic_enhance","binarize","cleanup","clahe","denoise","sharpen","deskew"]
+  const modes = ["restore","docres_base","docres_finetune","docres_onnx","docres_dewarping","docres_appearance","docres_appearance_mixed","docres_appearance_mixed_v5","docres_appearance_mixed_v5_lift12","docres_appearance_mixed_v5_tiled_lift12","docres_appearance_mixed_v5_tiled_lift12_base_detail","docres_deblurring","docres_end2end","dewarpnet","opencv_dewarp","controlpoints_dewarp","geotr_doc3d_dewarp","geotr_doc3d_docres","sam_geotr_docres","sam_perspective_appearance","textline_refine_dewarp","auto_dewarp","magic_enhance","binarize","cleanup","clahe","denoise","sharpen","deskew"]
   const pipelineModes = [
     { value: 'full', label: 'Full Pipeline', desc: 'AI + white balance + whitening + CLAHE' },
     { value: 'ai_only', label: 'AI Only', desc: 'Model output langsung, warna terjaga' },
@@ -55,7 +55,7 @@
     { value: 'color', label: 'AI + CLAHE', desc: 'AI + contrast enhancement, tanpa white balance' },
   ]
   const pretrainedModes = ['SD7K', 'Jung', 'Kligler'].map(name => ({ name }))
-  const modeLabels = { restore: "AI Restore", docres_base: "DocRes Base", docres_finetune: "DocRes Finetune", docres_onnx: "DocRes ONNX", docres_dewarping: "DocRes Dewarping", docres_appearance: "DocRes Appearance", docres_appearance_mixed: "Appearance Mixed Custom (1,419 pairs)", docres_appearance_mixed_v5: "Appearance Mixed → V5 Blend75 + Lift15", docres_appearance_mixed_v5_lift12: "Appearance Mixed → V5 Blend75 + LIFT12", docres_appearance_mixed_v5_tiled_lift12: "Appearance Mixed → V5 Tiled 576 + Blend75 + LIFT12", docres_deblurring: "DocRes Deblurring", docres_end2end: "DocRes End2End (Dewarp+Deshadow+Appear)", dewarpnet: "DewarpNet (ICCV)", opencv_dewarp: "OpenCV Dewarp", controlpoints_dewarp: "Control Points Dewarp", geotr_doc3d_dewarp: "GeoTr Doc3D Dewarp", geotr_doc3d_docres: "GeoTr Doc3D + Deshadow + Appearance", sam_geotr_docres: "SAM Edge + GeoTr + Deshadow + Appearance", sam_perspective_appearance: "SAM Perspective + Appearance", textline_refine_dewarp: "Textline Refine Dewarp (Exp)", auto_dewarp: "Auto Dewarp (Smart)", magic_enhance: "Magic Enhance", binarize: "Binarize", cleanup: "Full Cleanup", clahe: "CLAHE", denoise: "Denoise", sharpen: "Sharpen", deskew: "Deskew" }
+  const modeLabels = { restore: "AI Restore", docres_base: "DocRes Base", docres_finetune: "DocRes Finetune", docres_onnx: "DocRes ONNX", docres_dewarping: "DocRes Dewarping", docres_appearance: "DocRes Appearance", docres_appearance_mixed: "Appearance Mixed Custom (1,419 pairs)", docres_appearance_mixed_v5: "Appearance Mixed → V5 Blend75 + Lift15", docres_appearance_mixed_v5_lift12: "Appearance Mixed → V5 Blend75 + LIFT12", docres_appearance_mixed_v5_tiled_lift12: "Appearance Mixed → V5 Tiled 576 + Blend75 + LIFT12", docres_appearance_mixed_v5_tiled_lift12_base_detail: "Appearance Mixed → V5 Tiled + LIFT12 + Base Appearance Detail", docres_deblurring: "DocRes Deblurring", docres_end2end: "DocRes End2End (Dewarp+Deshadow+Appear)", dewarpnet: "DewarpNet (ICCV)", opencv_dewarp: "OpenCV Dewarp", controlpoints_dewarp: "Control Points Dewarp", geotr_doc3d_dewarp: "GeoTr Doc3D Dewarp", geotr_doc3d_docres: "GeoTr Doc3D + Deshadow + Appearance", sam_geotr_docres: "SAM Edge + GeoTr + Deshadow + Appearance", sam_perspective_appearance: "SAM Perspective + Appearance", textline_refine_dewarp: "Textline Refine Dewarp (Exp)", auto_dewarp: "Auto Dewarp (Smart)", magic_enhance: "Magic Enhance", binarize: "Binarize", cleanup: "Full Cleanup", clahe: "CLAHE", denoise: "Denoise", sharpen: "Sharpen", deskew: "Deskew" }
   $: availableDocshadowNames = new Set(docshadowWeights.map(w => w.name))
   $: docshadowModes = pretrainedModes.map(w => `docshadow:${w.name}`)
   $: allModeLabels = {
@@ -508,7 +508,7 @@
   let compareResult = null
   let compareView = 'finetuned'
   let comparing = false
-  const isDocresMode = (m) => ['docres_base','docres_finetune','docres_appearance','docres_appearance_mixed','docres_appearance_mixed_v5','docres_appearance_mixed_v5_lift12','docres_appearance_mixed_v5_tiled_lift12','docres_deblurring'].includes(m)
+  const isDocresMode = (m) => ['docres_base','docres_finetune','docres_appearance','docres_appearance_mixed','docres_appearance_mixed_v5','docres_appearance_mixed_v5_lift12','docres_appearance_mixed_v5_tiled_lift12','docres_appearance_mixed_v5_tiled_lift12_base_detail','docres_deblurring'].includes(m)
 
   async function runCompare() {
     if (!selectedFile) return
