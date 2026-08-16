@@ -1922,7 +1922,7 @@ async def scan_document(request: Request, file: UploadFile = File(...), mode: st
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Mixed V5 load/infer failed: {e}")
 
-    elif mode in ("docres_appearance_mixed_v5_tiled_lift12", "docres_appearance_mixed_v5_tiled_lift12_base_detail", "docres_appearance_mixed_v5_tiled_lift12_base_detail_v2"):
+    elif mode in ("docres_appearance_mixed_v5_tiled_lift12", "docres_appearance_mixed_v5_tiled_lift12_base_detail", "docres_appearance_mixed_v5_tiled_lift12_base_detail_v2", "docres_appearance_mixed_v5_tiled_lift12_base_lowfreq"):
         try:
             import tempfile, os, importlib.util
             if _appearance_mixed is None:
@@ -1947,12 +1947,14 @@ async def scan_document(request: Request, file: UploadFile = File(...), mode: st
             mask *= 1.0 - 0.5 * edge
             luma = np.clip(luma + np.minimum(luma * 0.12 * mask, 22.0), 0.0, 255.0)
             result_rgb = cv2.cvtColor(cv2.merge([luma, aa, bb]).astype(np.uint8), cv2.COLOR_LAB2RGB)
-            if mode in ("docres_appearance_mixed_v5_tiled_lift12_base_detail", "docres_appearance_mixed_v5_tiled_lift12_base_detail_v2"):
+            if mode in ("docres_appearance_mixed_v5_tiled_lift12_base_detail", "docres_appearance_mixed_v5_tiled_lift12_base_detail_v2", "docres_appearance_mixed_v5_tiled_lift12_base_lowfreq"):
                 base_onnx = get_docres_onnx_model()
                 if base_onnx is None:
                     raise RuntimeError("Base Appearance ONNX not loaded")
                 base_rgb = np.array(base_onnx.infer(image, task="appearance"))
-                if mode.endswith("_v2"):
+                if mode.endswith("_base_lowfreq"):
+                    result_rgb = _base_lowfreq_shadow_fuse(base_rgb, result_rgb, alpha=0.15, sigma=45.0)
+                elif mode.endswith("_v2"):
                     result_rgb = _base_appearance_detail_fuse_v2(base_rgb, result_rgb, np.array(image), strength=0.35)
                 else:
                     result_rgb = _base_appearance_detail_fuse(base_rgb, result_rgb, alpha=1.0, sigma=1.0)
@@ -2175,6 +2177,19 @@ def _base_appearance_detail_fuse(base_rgb, candidate_rgb, alpha=1.0, sigma=1.0):
     return cv2.cvtColor(cand_lab.astype(np.uint8), cv2.COLOR_LAB2RGB)
 
 
+def _base_lowfreq_shadow_fuse(base_rgb, candidate_rgb, alpha=0.15, sigma=45.0):
+    """Keep Base Appearance detail; borrow only broad candidate luminance correction."""
+    base_lab = cv2.cvtColor(base_rgb, cv2.COLOR_RGB2LAB).astype(np.float32)
+    cand_lab = cv2.cvtColor(candidate_rgb, cv2.COLOR_RGB2LAB).astype(np.float32)
+    base_l = base_lab[:, :, 0]
+    cand_l = cand_lab[:, :, 0]
+    base_blur = cv2.GaussianBlur(base_l, (0, 0), sigma)
+    cand_blur = cv2.GaussianBlur(cand_l, (0, 0), sigma)
+    delta = np.clip(cand_blur - base_blur, -10.0, 10.0)
+    base_lab[:, :, 0] = np.clip(base_l + alpha * delta, 0.0, 255.0)
+    return cv2.cvtColor(base_lab.astype(np.uint8), cv2.COLOR_LAB2RGB)
+
+
 def _base_appearance_detail_fuse_v2(base_rgb, candidate_rgb, input_rgb, strength=0.35):
     """Conservative Base multi-scale detail injection on input-evidenced strokes."""
     base_lab = cv2.cvtColor(base_rgb, cv2.COLOR_RGB2LAB).astype(np.float32)
@@ -2255,14 +2270,16 @@ def _compare_mixed_chain(image, selected_mode):
     v5 = get_docres_ft_model("finetune_v5")
     if v5 is None:
         raise RuntimeError("V5 model not loaded")
-    if selected_mode in ("docres_appearance_mixed_v5_tiled_lift12", "docres_appearance_mixed_v5_tiled_lift12_base_detail", "docres_appearance_mixed_v5_tiled_lift12_base_detail_v2"):
+    if selected_mode in ("docres_appearance_mixed_v5_tiled_lift12", "docres_appearance_mixed_v5_tiled_lift12_base_detail", "docres_appearance_mixed_v5_tiled_lift12_base_detail_v2", "docres_appearance_mixed_v5_tiled_lift12_base_lowfreq"):
         v5_rgb = _v5_tiled_infer(v5, mixed_bgr)
     else:
         v5_rgb = np.array(v5.infer(Image.fromarray(mixed_rgb)))
     arr = np.clip(0.75 * v5_rgb.astype(np.float32) + 0.25 * mixed_rgb.astype(np.float32), 0, 255).astype(np.uint8)
     if selected_mode == "docres_appearance_mixed_v5":
         return Image.fromarray(arr), "Mixed best iter1500 + V5 Blend75"
-    if selected_mode == "docres_appearance_mixed_v5_tiled_lift12_base_detail_v2":
+    if selected_mode == "docres_appearance_mixed_v5_tiled_lift12_base_lowfreq":
+        tiled_label = "Base Appearance + low-frequency shadow correction"
+    elif selected_mode == "docres_appearance_mixed_v5_tiled_lift12_base_detail_v2":
         tiled_label = "Mixed best iter1500 + V5 tiled + LIFT12 + Base Appearance detail v2"
     elif selected_mode == "docres_appearance_mixed_v5_tiled_lift12_base_detail":
         tiled_label = "Mixed best iter1500 + V5 tiled + LIFT12 + Base Appearance detail"
@@ -2278,12 +2295,14 @@ def _compare_mixed_chain(image, selected_mode):
     edge = np.clip(np.abs(cv2.Laplacian(gray, cv2.CV_32F)) / 45.0, 0.0, 1.0)
     luma = np.clip(luma + np.minimum(luma * 0.12 * mask * (1.0 - 0.5 * edge), 22.0), 0.0, 255.0)
     result = cv2.cvtColor(cv2.merge([luma, aa, bb]).astype(np.uint8), cv2.COLOR_LAB2RGB)
-    if selected_mode in ("docres_appearance_mixed_v5_tiled_lift12_base_detail", "docres_appearance_mixed_v5_tiled_lift12_base_detail_v2"):
+    if selected_mode in ("docres_appearance_mixed_v5_tiled_lift12_base_detail", "docres_appearance_mixed_v5_tiled_lift12_base_detail_v2", "docres_appearance_mixed_v5_tiled_lift12_base_lowfreq"):
         base_onnx = get_docres_onnx_model()
         if base_onnx is None:
             raise RuntimeError("Base Appearance ONNX not loaded")
         base_rgb = np.array(base_onnx.infer(image, task="appearance"))
-        if selected_mode.endswith("_v2"):
+        if selected_mode.endswith("_base_lowfreq"):
+            result = _base_lowfreq_shadow_fuse(base_rgb, result, alpha=0.15, sigma=45.0)
+        elif selected_mode.endswith("_v2"):
             result = _base_appearance_detail_fuse_v2(base_rgb, result, np.array(image), strength=0.35)
         else:
             result = _base_appearance_detail_fuse(base_rgb, result, alpha=1.0, sigma=1.0)
@@ -2294,7 +2313,7 @@ def _compare_mixed_chain(image, selected_mode):
 async def docres_compare(request: Request, file: UploadFile = File(...), task: str = Form("deshadowing"),
                          selected_mode: str = Form("docres_appearance_mixed")):
     """Compare Base against explicitly selected DocAI model/pipeline on same input."""
-    allowed = {"docres_base", "docres_appearance_mixed", "docres_appearance_mixed_v5", "docres_appearance_mixed_v5_lift12", "docres_appearance_mixed_v5_tiled_lift12", "docres_appearance_mixed_v5_tiled_lift12_base_detail", "docres_appearance_mixed_v5_tiled_lift12_base_detail_v2"}
+    allowed = {"docres_base", "docres_appearance_mixed", "docres_appearance_mixed_v5", "docres_appearance_mixed_v5_lift12", "docres_appearance_mixed_v5_tiled_lift12", "docres_appearance_mixed_v5_tiled_lift12_base_detail", "docres_appearance_mixed_v5_tiled_lift12_base_detail_v2", "docres_appearance_mixed_v5_tiled_lift12_base_lowfreq"}
     if selected_mode not in allowed:
         raise HTTPException(status_code=400, detail=f"Unsupported compare mode: {selected_mode}")
     unload_idle_models()
